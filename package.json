@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "GTM_MIN_INTERVAL_MS=1 GTM_START_INTERVAL_MS=1 GTM_QUOTA_COOLDOWN_MS=10 node --experimental-strip-types --import ./test/register.mjs --test test/*.test.ts"
   },
   "dependencies": {
     "googleapis": "^173.0.0",

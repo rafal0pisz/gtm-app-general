@@ -64,29 +64,30 @@ export interface BulkPublishResult {
   error?: string;
 }
 
-const BATCH_SIZE = 3;
-const BATCH_DELAY_MS = 2_000;
-// Small stagger between individual write calls within one container — the
-// Tag Manager API quota is per-user across all containers combined, so a
-// burst of 10+ tag creates/updates back to back is as risky as concurrency
-// across containers.
-const CALL_DELAY_MS = 300;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// Writes touch several endpoints per container and are the expensive case,
+// so they stay modest. Read-only listing can run wider — the shared rate
+// limiter in gtm-client is what actually keeps the request rate under quota
+// now, so extra fixed delays here would only slow things down without
+// making them safer.
+const WRITE_CONCURRENCY = 4;
+const READ_CONCURRENCY = 10;
 
 async function runInBatches<T, R>(
   items: T[],
-  worker: (item: T) => Promise<R>
+  worker: (item: T) => Promise<R>,
+  concurrency: number = WRITE_CONCURRENCY
 ): Promise<R[]> {
-  const results: R[] = [];
-  for (let i = 0; i < items.length; i += BATCH_SIZE) {
-    if (i > 0) await sleep(BATCH_DELAY_MS);
-    const batch = items.slice(i, i + BATCH_SIZE);
-    const settled = await Promise.all(batch.map((item) => worker(item)));
-    results.push(...settled);
-  }
+  const results: R[] = new Array(items.length);
+  let next = 0;
+
+  const run = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await worker(items[index]);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
   return results;
 }
 
@@ -94,8 +95,13 @@ async function runInBatches<T, R>(
 // many tags need a trigger resolved.
 class TriggerResolver {
   private map: Map<string, string> | null = null;
+  private tm: tagmanager_v2.Tagmanager;
+  private parent: string;
 
-  constructor(private tm: tagmanager_v2.Tagmanager, private parent: string) {}
+  constructor(tm: tagmanager_v2.Tagmanager, parent: string) {
+    this.tm = tm;
+    this.parent = parent;
+  }
 
   async resolve(name: string): Promise<string> {
     if (!this.map) {
@@ -148,12 +154,15 @@ class CustomTemplateResolver {
   private sourceTemplates: tagmanager_v2.Schema$CustomTemplate[] | null = null;
   private targetTemplates: tagmanager_v2.Schema$CustomTemplate[] | null = null;
   private cache = new Map<string, string>();
+  private tm: tagmanager_v2.Tagmanager;
+  private sourceParent: string;
+  private targetParent: string;
 
-  constructor(
-    private tm: tagmanager_v2.Tagmanager,
-    private sourceParent: string,
-    private targetParent: string
-  ) {}
+  constructor(tm: tagmanager_v2.Tagmanager, sourceParent: string, targetParent: string) {
+    this.tm = tm;
+    this.sourceParent = sourceParent;
+    this.targetParent = targetParent;
+  }
 
   async resolve(sourceType: string): Promise<string> {
     const match = /^cvt_(.+)$/.exec(sourceType);
@@ -325,7 +334,6 @@ async function pauseTagsByName(
       changes.push(`Tag "${name}" already paused — skipped`);
       continue;
     }
-    await sleep(CALL_DELAY_MS);
     await withRetry(
       () =>
         tm.accounts.containers.workspaces.tags.update({
@@ -361,7 +369,6 @@ async function applyToContainer(
         existingTags.filter((t) => t.name).map((t) => [t.name!.trim().toLowerCase(), t])
       );
       for (const tagSpec of options.publishTags) {
-        await sleep(CALL_DELAY_MS);
         const result = await upsertPublishTag(tm, parent, tagSpec, knownByName, triggers, templates, changes);
         knownByName.set(tagSpec.name.trim().toLowerCase(), result);
       }
@@ -523,7 +530,7 @@ export async function bulkListWorkspaces(
   targets: BulkTarget[]
 ): Promise<ContainerWorkspacesResult[]> {
   const tm = tagmanagerClient(accessToken);
-  return runInBatches(targets, (target) => fetchWorkspacesForContainer(tm, target));
+  return runInBatches(targets, (target) => fetchWorkspacesForContainer(tm, target), READ_CONCURRENCY);
 }
 
 export interface CreateVersionTarget {
@@ -562,14 +569,26 @@ async function createVersionFromWorkspace(
         }),
       "workspaces.create_version"
     );
+    // A "successful" create_version can still not produce a version: GTM
+    // reports a template/tag that fails to compile via compilerError rather
+    // than an HTTP error, and a workspace with nothing new in it comes back
+    // with no containerVersion at all. Both would otherwise show up as OK
+    // with nothing to publish.
+    if (versionRes.data.compilerError) {
+      throw new Error("The container failed to compile — check the workspace for tag or template errors in GTM.");
+    }
     const version = versionRes.data.containerVersion;
+    if (!version?.containerVersionId) {
+      throw new Error("No version was created — this workspace has no changes to publish.");
+    }
+
     return {
       accountId: target.accountId,
       containerId: target.containerId,
       containerName: target.containerName,
       status: "ok",
-      versionId: version?.containerVersionId ?? undefined,
-      versionName: version?.name ?? versionName,
+      versionId: version.containerVersionId,
+      versionName: version.name ?? versionName,
     };
   } catch (err) {
     return {

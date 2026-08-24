@@ -61,13 +61,46 @@ function backoffDelay(attempt: number): number {
 // it. A single process-wide gate that paces the actual moment each HTTP
 // call goes out — not how many are in flight — keeps the real request rate
 // under the quota regardless of how much concurrency callers throw at it.
-const RATE_LIMIT_INTERVAL_MS = Number(process.env.GTM_RATE_LIMIT_MS) || 500;
+//
+// The exact ceiling isn't knowable from here (it varies per project and
+// isn't reported in the error), so rather than hardcode a guess, the pace
+// adapts: back off hard the moment Google reports the quota was hit, then
+// creep back toward full speed while calls keep succeeding. That way a
+// project with a generous quota isn't permanently throttled to the slowest
+// safe speed, and a project with a tight one still settles under it instead
+// of failing.
+const MIN_INTERVAL_MS = Number(process.env.GTM_MIN_INTERVAL_MS) || 200;
+const MAX_INTERVAL_MS = Number(process.env.GTM_MAX_INTERVAL_MS) || 4_000;
+const START_INTERVAL_MS = Number(process.env.GTM_START_INTERVAL_MS) || 400;
+// The quota is measured per minute, so a hit means that minute's allowance
+// is already spent — a brief full stop lets it start refilling instead of
+// trickling more doomed requests at it.
+const QUOTA_COOLDOWN_MS = Number(process.env.GTM_QUOTA_COOLDOWN_MS) || 5_000;
+// How many consecutive successes before easing the pace back up. High
+// enough that one lucky call doesn't undo a backoff.
+const SPEEDUP_AFTER_OK = 15;
 
-class RateLimiter {
+export class AdaptiveRateLimiter {
   private queue: Promise<void> = Promise.resolve();
   private lastDispatch = 0;
+  private intervalMs: number;
+  private pauseUntil = 0;
+  private okStreak = 0;
+  private minIntervalMs: number;
+  private maxIntervalMs: number;
+  private cooldownMs: number;
 
-  constructor(private minIntervalMs: number) {}
+  constructor(
+    minIntervalMs = MIN_INTERVAL_MS,
+    maxIntervalMs = MAX_INTERVAL_MS,
+    startIntervalMs = START_INTERVAL_MS,
+    cooldownMs = QUOTA_COOLDOWN_MS
+  ) {
+    this.minIntervalMs = minIntervalMs;
+    this.maxIntervalMs = maxIntervalMs;
+    this.intervalMs = startIntervalMs;
+    this.cooldownMs = cooldownMs;
+  }
 
   // Reserves the next available dispatch slot and resolves once it arrives.
   // Only the *waiting* is serialized here — the caller's own call still runs
@@ -75,16 +108,36 @@ class RateLimiter {
   // don't back up the queue for everyone else.
   async waitForSlot(): Promise<void> {
     const mySlot = this.queue.then(async () => {
-      const wait = Math.max(0, this.lastDispatch + this.minIntervalMs - Date.now());
+      const readyAt = Math.max(this.lastDispatch + this.intervalMs, this.pauseUntil);
+      const wait = readyAt - Date.now();
       if (wait > 0) await sleep(wait);
       this.lastDispatch = Date.now();
     });
-    this.queue = mySlot;
+    // Swallow rejections on the chain itself so one caller's failure can't
+    // poison every subsequent waiter — each caller still awaits its own slot.
+    this.queue = mySlot.catch(() => {});
     await mySlot;
+  }
+
+  reportQuotaError(): void {
+    this.okStreak = 0;
+    this.intervalMs = Math.min(this.maxIntervalMs, Math.round(this.intervalMs * 2));
+    this.pauseUntil = Date.now() + this.cooldownMs;
+  }
+
+  reportSuccess(): void {
+    if (this.intervalMs <= this.minIntervalMs) return;
+    if (++this.okStreak < SPEEDUP_AFTER_OK) return;
+    this.okStreak = 0;
+    this.intervalMs = Math.max(this.minIntervalMs, Math.round(this.intervalMs * 0.75));
+  }
+
+  get currentIntervalMs(): number {
+    return this.intervalMs;
   }
 }
 
-const gtmRateLimiter = new RateLimiter(RATE_LIMIT_INTERVAL_MS);
+const gtmRateLimiter = new AdaptiveRateLimiter();
 
 export interface RetryOptions {
   maxAttempts?: number;
@@ -111,16 +164,25 @@ export async function withRetry<T>(
 ): Promise<T> {
   const maxAttempts = opts.maxAttempts ?? 6;
   const budgetMs = opts.budgetMs ?? 45_000;
-  const start = Date.now();
+  // Measured from the first dispatch, not from entry: waiting for a slot in
+  // a large concurrent batch is queueing, not backoff, and charging it to
+  // the retry budget would leave calls at the back of the queue no room to
+  // retry at all.
+  let start = 0;
   for (let attempt = 1; ; attempt++) {
     try {
       await gtmRateLimiter.waitForSlot();
-      return await fn();
+      if (start === 0) start = Date.now();
+      const result = await fn();
+      gtmRateLimiter.reportSuccess();
+      return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const isQuota = /quota exceeded|rate limit exceeded|too many requests/i.test(message);
+      if (!isQuota) throw err;
+      gtmRateLimiter.reportQuotaError();
       const elapsed = Date.now() - start;
-      if (!isQuota || attempt >= maxAttempts || elapsed >= budgetMs) throw err;
+      if (attempt >= maxAttempts || elapsed >= budgetMs) throw err;
       const delayMs = Math.min(backoffDelay(attempt), budgetMs - elapsed);
       console.warn(`[gtm] ${label} hit quota (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms`);
       await sleep(delayMs);
@@ -139,12 +201,17 @@ export async function fetchWithRetry(
 ): Promise<Response> {
   const maxAttempts = opts.maxAttempts ?? 6;
   const budgetMs = opts.budgetMs ?? 45_000;
-  const start = Date.now();
+  // See withRetry(): timed from first dispatch, so queueing behind other
+  // concurrent calls doesn't eat the retry budget.
+  let start = 0;
   for (let attempt = 1; ; attempt++) {
     await gtmRateLimiter.waitForSlot();
+    if (start === 0) start = Date.now();
     const res = await fetch(url, init);
-    const elapsed = Date.now() - start;
-    if (res.ok || attempt >= maxAttempts || elapsed >= budgetMs) return res;
+    if (res.ok) {
+      gtmRateLimiter.reportSuccess();
+      return res;
+    }
 
     let isQuota = res.status === 429;
     if (!isQuota) {
@@ -155,6 +222,10 @@ export async function fetchWithRetry(
       }
     }
     if (!isQuota) return res;
+
+    gtmRateLimiter.reportQuotaError();
+    const elapsed = Date.now() - start;
+    if (attempt >= maxAttempts || elapsed >= budgetMs) return res;
 
     const delayMs = Math.min(backoffDelay(attempt), budgetMs - elapsed);
     console.warn(`[gtm] ${label} hit quota (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms`);

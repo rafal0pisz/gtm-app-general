@@ -63,7 +63,8 @@ async function readErrorMessage(res: Response): Promise<string> {
 // this account's container list incomplete.
 async function fetchContainersForAccount(
   account: GtmAccountInfo,
-  accessToken: string
+  accessToken: string,
+  deadline: number
 ): Promise<GtmContainerInfo[]> {
   const all: GtmContainerInfo[] = [];
   let pageToken: string | undefined;
@@ -72,15 +73,13 @@ async function fetchContainersForAccount(
     const url = new URL(`${GTM_BASE}/accounts/${account.accountId}/containers`);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
-    // Every account in the batch fires this concurrently, but the shared
-    // rate limiter in fetchWithRetry paces the actual outbound requests, so
-    // this budget just needs enough room to wait its turn in a large batch
-    // plus a few retries — not to outlast the whole HTTP request.
+    // Never retry past the caller's deadline — overshooting it is what turns
+    // a recoverable per-account error into a whole-request timeout.
     const res = await fetchWithRetry(
       url,
       { headers: { Authorization: `Bearer ${accessToken}` } },
       "containers.list",
-      { budgetMs: 25_000 }
+      { budgetMs: Math.max(0, Math.min(20_000, deadline - Date.now())) }
     );
     if (!res.ok) {
       throw new Error(await readErrorMessage(res));
@@ -141,39 +140,54 @@ export async function fetchGtmAccountList(accessToken: string): Promise<GtmAccou
 export interface FetchContainersResult {
   containers: GtmContainerInfo[];
   failedAccounts: FailedAccount[];
+  // Accounts this call ran out of time to reach at all. Not errors — the
+  // caller should simply send them again in the next request.
+  pendingAccounts: GtmAccountInfo[];
 }
 
-// Fetches containers for a caller-supplied slice of accounts only — the
-// caller (an API route handling one request per small chunk of accounts)
-// decides how big that slice is, which keeps any single HTTP round-trip
-// short and safely inside any hosting platform's function time limit,
-// however many accounts there are in total across repeated calls.
-//
-// All accounts in the slice are launched together rather than in staggered
-// sub-batches: the shared rate limiter inside fetchWithRetry is what
-// actually paces the outbound requests now, so an extra layer of manual
-// batching here would only add latency without adding safety.
+// How many accounts to have in flight at once. The rate limiter is what
+// actually controls the request rate, so this only needs to be high enough
+// to keep the limiter's queue fed while some accounts are paging through
+// results.
+const CONCURRENCY = 8;
+
+// Leaves room to serialize and return the response before any hosting
+// platform's function limit (the tightest common one is 60s) kicks in.
+const DEFAULT_DEADLINE_MS = 40_000;
+
+// Fetches containers for a caller-supplied slice of accounts, stopping at a
+// deadline well inside the hosting platform's function time limit. Whatever
+// it didn't get to comes back as `pendingAccounts` for the caller to send
+// again, so a slow run degrades into more round-trips instead of a timeout
+// that loses every account in the slice at once.
 export async function fetchContainersForAccounts(
   accessToken: string,
-  accounts: GtmAccountInfo[]
+  accounts: GtmAccountInfo[],
+  deadlineMs: number = DEFAULT_DEADLINE_MS
 ): Promise<FetchContainersResult> {
   const containers: GtmContainerInfo[] = [];
   const failedAccounts: FailedAccount[] = [];
+  const deadline = Date.now() + deadlineMs;
 
-  const results = await Promise.allSettled(
-    accounts.map((account) => fetchContainersForAccount(account, accessToken))
-  );
+  let next = 0;
+  const takeNext = (): GtmAccountInfo | null => {
+    if (next >= accounts.length || Date.now() >= deadline) return null;
+    return accounts[next++];
+  };
 
-  results.forEach((r, idx) => {
-    if (r.status === "fulfilled") {
-      containers.push(...r.value);
-    } else {
-      const account = accounts[idx];
-      const error = r.reason instanceof Error ? r.reason.message : String(r.reason);
-      console.warn(`[gtm-containers] account ${account.accountId} (${account.name}) failed:`, error);
-      failedAccounts.push({ accountId: account.accountId, name: account.name, error });
+  const worker = async (): Promise<void> => {
+    for (let account = takeNext(); account; account = takeNext()) {
+      try {
+        containers.push(...(await fetchContainersForAccount(account, accessToken, deadline)));
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        console.warn(`[gtm-containers] account ${account.accountId} (${account.name}) failed:`, error);
+        failedAccounts.push({ accountId: account.accountId, name: account.name, error });
+      }
     }
-  });
+  };
 
-  return { containers, failedAccounts };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, accounts.length) }, worker));
+
+  return { containers, failedAccounts, pendingAccounts: accounts.slice(next) };
 }

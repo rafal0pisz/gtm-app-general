@@ -1,5 +1,5 @@
 import { getValidAccessToken } from "@/lib/gtm-session";
-import { fetchContainersForAccounts, type FailedAccount } from "@/lib/gtm-containers";
+import { fetchContainersForAccounts, type FailedAccount, type GtmAccountInfo } from "@/lib/gtm-containers";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 90;
@@ -46,7 +46,10 @@ export async function POST(req: Request) {
       );
     }
 
-    const { containers, failedAccounts } = await fetchContainersForAccounts(session.accessToken, accounts);
+    const { containers, failedAccounts, pendingAccounts } = await fetchContainersForAccounts(
+      session.accessToken,
+      accounts
+    );
     const result: GtmContainer[] = containers.map((c) => ({
       accountId: c.accountId,
       accountName: c.accountName,
@@ -57,8 +60,13 @@ export async function POST(req: Request) {
       parsed: c.parsed,
     }));
 
-    const response: { containers: GtmContainer[]; failedAccounts?: FailedAccount[] } = { containers: result };
+    const response: {
+      containers: GtmContainer[];
+      failedAccounts?: FailedAccount[];
+      pendingAccounts?: GtmAccountInfo[];
+    } = { containers: result };
     if (failedAccounts.length > 0) response.failedAccounts = failedAccounts;
+    if (pendingAccounts.length > 0) response.pendingAccounts = pendingAccounts;
 
     return Response.json(response);
   } catch (err) {

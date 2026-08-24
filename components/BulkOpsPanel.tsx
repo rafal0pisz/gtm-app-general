@@ -2,16 +2,25 @@
 
 import { useState, useMemo, useCallback } from "react";
 import type { GtmContainer } from "@/app/api/gtm/accounts/containers/route";
+import { scanAccountsForContainers } from "@/lib/container-scan";
 
 const R = "4px";
 // Kept small: each container can take a while now that write calls retry
 // with backoff on GTM API quota errors, so a big chunk risks the Vercel
 // function timing out before it finishes.
 const CHUNK_SIZE = 4;
-// How many accounts' containers to fetch per /api/gtm/accounts/containers
-// call — small enough that one call always finishes quickly regardless of
-// hosting time limits, however many accounts there are in total.
+// Listing workspaces is read-only and one call per container, so it can go
+// much wider than the write paths. Capped at what the route accepts.
+const WORKSPACE_CHUNK_SIZE = 20;
+// How many accounts' containers to ask for per /api/gtm/accounts/containers
+// call. The server stops at its own deadline and hands back whatever it
+// didn't reach, so this is an upper bound on one round-trip's work, not a
+// promise that all of it gets done in that call.
 const ACCOUNT_CHUNK_SIZE = 25;
+// How many times an account that errored is retried before it's reported as
+// failed. Quota errors are transient, so a couple of extra passes clears
+// nearly all of them without the user doing anything.
+const MAX_ACCOUNT_ATTEMPTS = 3;
 
 interface ApplyResult {
   accountId: string;
@@ -31,6 +40,12 @@ interface PublishResult {
   versionId: string;
   status: "ok" | "error";
   error?: string;
+}
+
+interface BulkTargetRow {
+  accountId: string;
+  containerId: string;
+  containerName: string;
 }
 
 interface ContainerWorkspacesRow {
@@ -158,50 +173,36 @@ export function BulkOpsPanel() {
 
       setAccountScanProgress({ done: 0, total: allAccounts.length });
 
-      const foundContainers: GtmContainer[] = [];
-      const allFailedAccounts: { accountId: string; name: string; error: string }[] = [];
-      const remaining = new Set(targetIds);
-      const batches = chunk(allAccounts, ACCOUNT_CHUNK_SIZE);
-
-      for (const batch of batches) {
-        if (isTargeted && remaining.size === 0) break;
-
-        try {
+      const scan = await scanAccountsForContainers<GtmContainer>({
+        accounts: allAccounts,
+        chunkSize: ACCOUNT_CHUNK_SIZE,
+        maxAttempts: MAX_ACCOUNT_ATTEMPTS,
+        targetPublicIds: isTargeted ? targetIds : undefined,
+        publicIdOf: (c) => c.publicId,
+        fetchChunk: async (batch) => {
           const res = await fetch("/api/gtm/accounts/containers", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ accounts: batch }),
           });
-          if (res.ok) {
-            const data = (await res.json()) as {
-              containers: GtmContainer[];
-              failedAccounts?: { accountId: string; name: string; error: string }[];
-            };
-            for (const c of data.containers) {
-              if (!isTargeted || remaining.has(c.publicId)) {
-                foundContainers.push(c);
-                remaining.delete(c.publicId);
-              }
-            }
-            if (data.failedAccounts) allFailedAccounts.push(...data.failedAccounts);
-          } else {
+          if (!res.ok) {
             const data = (await res.json().catch(() => ({}))) as { error?: string };
-            allFailedAccounts.push(
-              ...batch.map((a) => ({ accountId: a.accountId, name: a.name, error: data.error ?? `HTTP ${res.status}` }))
-            );
+            throw new Error(data.error ?? `HTTP ${res.status}`);
           }
-        } catch {
-          allFailedAccounts.push(...batch.map((a) => ({ accountId: a.accountId, name: a.name, error: "Network error." })));
-        }
+          return res.json();
+        },
+        // Update as it goes so the list and progress are visibly moving
+        // rather than a frozen spinner.
+        onProgress: ({ containers: found, done, total }) => {
+          setContainers(found);
+          setAccountScanProgress({ done, total });
+        },
+      });
 
-        // Update incrementally so the list/progress is visibly moving, not a frozen spinner.
-        setContainers([...foundContainers]);
-        setFailedAccounts([...allFailedAccounts]);
-        setAccountScanProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
-      }
-
-      setNotFoundIds(isTargeted ? [...remaining] : []);
-      if (isTargeted) setSelected(new Set(foundContainers.map((c) => c.publicId)));
+      setContainers(scan.containers);
+      setFailedAccounts(scan.failedAccounts);
+      setNotFoundIds(scan.notFoundIds);
+      if (isTargeted) setSelected(new Set(scan.containers.map((c) => c.publicId)));
       setLoaded(true);
     } catch {
       setContainersError("Failed to load the container list.");
@@ -454,33 +455,51 @@ export function BulkOpsPanel() {
       .map((c) => ({ accountId: c.accountId, containerId: c.containerId, containerName: c.containerName }));
 
     setWorkspacesProgress({ done: 0, total: targets.length });
-    const results: ContainerWorkspacesRow[] = [];
+    // Keyed by containerId so a retry replaces that container's row rather
+    // than adding a second one for it.
+    const rows = new Map<string, ContainerWorkspacesRow>();
     const defaults = new Map<string, string>();
 
-    for (const batch of chunk(targets, CHUNK_SIZE)) {
-      try {
-        const res = await fetch("/api/gtm/bulk/workspaces", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ targets: batch }),
-        });
-        if (res.ok) {
-          const data = (await res.json()) as { results: ContainerWorkspacesRow[] };
-          results.push(...data.results);
-          for (const r of data.results) {
-            const preferred = r.workspaces.find((w) => w.name === "Default Workspace") ?? r.workspaces[0];
-            if (preferred) defaults.set(r.containerId, preferred.workspaceId);
+    const runPass = async (pass: BulkTargetRow[]) => {
+      for (const batch of chunk(pass, WORKSPACE_CHUNK_SIZE)) {
+        try {
+          const res = await fetch("/api/gtm/bulk/workspaces", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ targets: batch }),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { results: ContainerWorkspacesRow[] };
+            for (const r of data.results) {
+              rows.set(r.containerId, r);
+              const preferred = r.workspaces.find((w) => w.name === "Default Workspace") ?? r.workspaces[0];
+              if (preferred) defaults.set(r.containerId, preferred.workspaceId);
+            }
+          } else {
+            const data = (await res.json().catch(() => ({}))) as { error?: string };
+            for (const t of batch) {
+              rows.set(t.containerId, { ...t, workspaces: [], error: data.error ?? `HTTP ${res.status}` });
+            }
           }
-        } else {
-          const data = (await res.json().catch(() => ({}))) as { error?: string };
-          results.push(...batch.map((t) => ({ ...t, workspaces: [], error: data.error ?? `HTTP ${res.status}` })));
+        } catch {
+          for (const t of batch) rows.set(t.containerId, { ...t, workspaces: [], error: "Network error." });
         }
-      } catch {
-        results.push(...batch.map((t) => ({ ...t, workspaces: [], error: "Network error." })));
+        setWorkspacesResults([...rows.values()]);
+        setChosenWorkspace(new Map(defaults));
+        setWorkspacesProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
       }
-      setWorkspacesResults([...results]);
-      setChosenWorkspace(new Map(defaults));
-      setWorkspacesProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
+    };
+
+    await runPass(targets);
+    // Same reasoning as the container scan: quota errors are transient, so
+    // retry the containers that failed instead of leaving them unselectable.
+    for (let attempt = 1; attempt < MAX_ACCOUNT_ATTEMPTS; attempt++) {
+      const failed = [...rows.values()].filter((r) => r.error);
+      if (failed.length === 0) break;
+      setWorkspacesProgress({ done: 0, total: failed.length });
+      await runPass(
+        failed.map((r) => ({ accountId: r.accountId, containerId: r.containerId, containerName: r.containerName }))
+      );
     }
 
     setWorkspacesLoading(false);
