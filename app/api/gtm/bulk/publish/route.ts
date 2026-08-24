@@ -1,0 +1,40 @@
+import { getGtmToken } from "@/lib/secret-manager";
+import { exchangeGtmToken } from "@/lib/gtm-containers";
+import { TENANT_ID } from "@/lib/tenant";
+import { bulkPublish, type BulkPublishTarget } from "@/lib/gtm-bulk-ops";
+
+export const maxDuration = 300;
+
+interface PublishBody {
+  targets?: BulkPublishTarget[];
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = (await req.json()) as PublishBody;
+    const targets = body.targets;
+
+    if (!Array.isArray(targets) || targets.length === 0) {
+      return Response.json({ error: "targets must be a non-empty array." }, { status: 400 });
+    }
+    if (targets.length > 20) {
+      return Response.json(
+        { error: "Max 20 versions per request — split the selection into smaller batches." },
+        { status: 400 }
+      );
+    }
+
+    const tokenData = await getGtmToken(TENANT_ID);
+    if (!tokenData) {
+      return Response.json({ error: "GTM is not connected. Connect it in Settings → Authorization." }, { status: 404 });
+    }
+    const accessToken = await exchangeGtmToken(tokenData.refresh_token);
+
+    const results = await bulkPublish(accessToken, targets);
+
+    return Response.json({ results });
+  } catch (err) {
+    console.error("[gtm/bulk/publish] unhandled error:", err instanceof Error ? err.stack ?? err.message : err);
+    return Response.json({ error: "Internal server error." }, { status: 500 });
+  }
+}

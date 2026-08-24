@@ -16,6 +16,15 @@ export function Header() {
 
       <div className="flex items-center gap-6">
         <Link
+          href="/bulk"
+          className="text-sm font-medium transition-colors duration-200"
+          style={{ color: "var(--text-secondary)" }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+          onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-secondary)")}
+        >
+          Bulk Publish
+        </Link>
+        <Link
           href="/settings"
           className="text-sm font-medium transition-colors duration-200"
           style={{ color: "var(--text-secondary)" }}

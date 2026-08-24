@@ -1,49 +1,14 @@
-import { google, tagmanager_v2 } from "googleapis";
+import type { tagmanager_v2 } from "googleapis";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
 import type { GtmContainerInfo } from "@/lib/gtm-containers";
+import { tagmanagerClient, resolveWorkspaceId } from "@/lib/gtm-client";
 
 // Direct Google Tag Manager API v2 tool set — replaces the old Stape MCP
 // integration. Deliberately exposes only read + create/update operations for
 // tags, triggers and variables. There is no delete/publish/account-management
 // tool here at all, so the "hard restrictions" in the system prompt are also
 // enforced structurally, not just by asking the model nicely.
-
-function tagmanagerClient(accessToken: string): tagmanager_v2.Tagmanager {
-  const auth = new google.auth.OAuth2();
-  auth.setCredentials({ access_token: accessToken });
-  return google.tagmanager({ version: "v2", auth });
-}
-
-// containerId/accountId → workspaceId. Workspaces are essentially static
-// once a container is set up, so a short-lived process-wide cache avoids a
-// list call on every single tool invocation in a chat turn.
-const WORKSPACE_CACHE_TTL_MS = 300_000;
-const workspaceCache = new Map<string, { workspaceId: string; expiresAt: number }>();
-
-async function resolveWorkspaceId(
-  tm: tagmanager_v2.Tagmanager,
-  accountId: string,
-  containerId: string
-): Promise<string> {
-  const key = `${accountId}:${containerId}`;
-  const cached = workspaceCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.workspaceId;
-
-  const parent = `accounts/${accountId}/containers/${containerId}`;
-  const res = await tm.accounts.containers.workspaces.list({ parent });
-  const workspaces = res.data.workspace ?? [];
-  const chosen =
-    workspaces.find((w) => w.name === "Default Workspace") ?? workspaces[0];
-  if (!chosen?.workspaceId) {
-    throw new Error(`No workspace found for container ${containerId}.`);
-  }
-  workspaceCache.set(key, {
-    workspaceId: chosen.workspaceId,
-    expiresAt: Date.now() + WORKSPACE_CACHE_TTL_MS,
-  });
-  return chosen.workspaceId;
-}
 
 function findAccountIdForContainer(
   containers: GtmContainerInfo[],
