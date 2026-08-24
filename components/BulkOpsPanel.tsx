@@ -173,6 +173,7 @@ export function BulkOpsPanel() {
 
       setAccountScanProgress({ done: 0, total: allAccounts.length });
 
+      let pacingMs = 0;
       const scan = await scanAccountsForContainers<GtmContainer>({
         accounts: allAccounts,
         chunkSize: ACCOUNT_CHUNK_SIZE,
@@ -183,13 +184,18 @@ export function BulkOpsPanel() {
           const res = await fetch("/api/gtm/accounts/containers", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ accounts: batch }),
+            // Each chunk may be served by a different instance, so the pace
+            // the last one settled on is handed forward — otherwise every
+            // chunk relearns the quota limit from scratch by hitting it.
+            body: JSON.stringify({ accounts: batch, pacingMs }),
           });
           if (!res.ok) {
             const data = (await res.json().catch(() => ({}))) as { error?: string };
             throw new Error(data.error ?? `HTTP ${res.status}`);
           }
-          return res.json();
+          const data = (await res.json()) as { pacingMs?: number };
+          if (typeof data.pacingMs === "number") pacingMs = data.pacingMs;
+          return data as Awaited<ReturnType<typeof res.json>>;
         },
         // Update as it goes so the list and progress are visibly moving
         // rather than a frozen spinner.

@@ -58,6 +58,25 @@ test("rate limiter never goes below its floor or above its ceiling", async () =>
   assert.equal(limiter.currentIntervalMs, 50, "must not drop below the floor");
 });
 
+test("an adopted pace only ever slows a limiter down, never speeds it up", async () => {
+  const limiter = new AdaptiveRateLimiter(50, 1_000, 100, 0);
+
+  limiter.adoptPace(400);
+  assert.equal(limiter.currentIntervalMs, 400, "a slower pace learned elsewhere should be adopted");
+
+  // A stale hint from an instance that never hit the quota must not undo
+  // backoff this instance just learned the hard way.
+  limiter.adoptPace(100);
+  assert.equal(limiter.currentIntervalMs, 400, "a faster hint must not undo real backoff");
+
+  limiter.adoptPace(99_999);
+  assert.equal(limiter.currentIntervalMs, 1_000, "must still respect the ceiling");
+
+  limiter.adoptPace(0);
+  limiter.adoptPace(Number.NaN);
+  assert.equal(limiter.currentIntervalMs, 1_000, "nonsense hints are ignored");
+});
+
 test("fetchWithRetry retries a 429 and returns the eventual success", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;

@@ -1,5 +1,6 @@
 import { getValidAccessToken } from "@/lib/gtm-session";
 import { fetchContainersForAccounts, type FailedAccount, type GtmAccountInfo } from "@/lib/gtm-containers";
+import { adoptPace, currentPaceMs } from "@/lib/gtm-client";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 90;
@@ -16,6 +17,8 @@ export interface GtmContainer {
 
 interface ContainersBody {
   accounts?: Array<{ accountId: string; name: string }>;
+  // The pace the previous chunk ended on — see adoptPace().
+  pacingMs?: number;
 }
 
 // Fetches containers for ONE caller-supplied chunk of accounts. The client
@@ -46,6 +49,8 @@ export async function POST(req: Request) {
       );
     }
 
+    if (typeof body.pacingMs === "number") adoptPace(body.pacingMs);
+
     const { containers, failedAccounts, pendingAccounts } = await fetchContainersForAccounts(
       session.accessToken,
       accounts
@@ -64,7 +69,8 @@ export async function POST(req: Request) {
       containers: GtmContainer[];
       failedAccounts?: FailedAccount[];
       pendingAccounts?: GtmAccountInfo[];
-    } = { containers: result };
+      pacingMs: number;
+    } = { containers: result, pacingMs: currentPaceMs() };
     if (failedAccounts.length > 0) response.failedAccounts = failedAccounts;
     if (pendingAccounts.length > 0) response.pendingAccounts = pendingAccounts;
 

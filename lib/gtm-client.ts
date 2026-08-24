@@ -135,9 +135,28 @@ export class AdaptiveRateLimiter {
   get currentIntervalMs(): number {
     return this.intervalMs;
   }
+
+  // Adopts a pace learned elsewhere, but only ever slows down. Each request
+  // may land on a fresh serverless instance whose limiter starts at full
+  // speed with no memory of the quota pressure the previous one hit, so the
+  // caller hands the last known pace back in. Refusing to speed up here
+  // means a stale hint can't undo backoff a warm instance just learned.
+  adoptPace(intervalMs: number): void {
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
+    this.intervalMs = Math.min(this.maxIntervalMs, Math.max(this.intervalMs, intervalMs));
+  }
 }
 
 const gtmRateLimiter = new AdaptiveRateLimiter();
+
+// Lets a request carry the pace forward to the next one (see adoptPace).
+export function currentPaceMs(): number {
+  return gtmRateLimiter.currentIntervalMs;
+}
+
+export function adoptPace(intervalMs: number): void {
+  gtmRateLimiter.adoptPace(intervalMs);
+}
 
 export interface RetryOptions {
   maxAttempts?: number;
