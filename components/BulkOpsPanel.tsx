@@ -4,7 +4,10 @@ import { useState, useMemo, useCallback } from "react";
 import type { GtmContainer } from "@/app/api/gtm/accounts/route";
 
 const R = "4px";
-const CHUNK_SIZE = 8;
+// Kept small: each container can take a while now that write calls retry
+// with backoff on GTM API quota errors, so a big chunk risks the Vercel
+// function timing out before it finishes.
+const CHUNK_SIZE = 4;
 
 interface ApplyResult {
   accountId: string;

@@ -22,7 +22,7 @@ export async function resolveWorkspaceId(
   if (cached && cached.expiresAt > Date.now()) return cached.workspaceId;
 
   const parent = `accounts/${accountId}/containers/${containerId}`;
-  const res = await tm.accounts.containers.workspaces.list({ parent });
+  const res = await withRetry(() => tm.accounts.containers.workspaces.list({ parent }), "workspaces.list");
   const workspaces = res.data.workspace ?? [];
   const chosen =
     workspaces.find((w) => w.name === "Default Workspace") ?? workspaces[0];
@@ -38,4 +38,29 @@ export async function resolveWorkspaceId(
 
 export function workspacePath(accountId: string, containerId: string, workspaceId: string): string {
   return `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// The Tag Manager API's default quota ("Queries per minute per user") is low
+// enough that a handful of containers with several tags each can trip it —
+// every call is against the same quota, regardless of which container it's
+// for. Rather than trying to stay under an unknown limit by tuning
+// concurrency alone, retry with backoff whenever Google reports the quota
+// was hit, so a run slows down instead of failing outright.
+export async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 6): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const isQuota = /quota exceeded|rate limit exceeded|too many requests/i.test(message);
+      if (!isQuota || attempt >= maxAttempts) throw err;
+      const delayMs = Math.min(20_000, 2 ** attempt * 1000);
+      console.warn(`[gtm] ${label} hit quota (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
 }
