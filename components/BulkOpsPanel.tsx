@@ -59,6 +59,7 @@ export function BulkOpsPanel() {
   const [loadingContainers, setLoadingContainers] = useState(false);
   const [containersError, setContainersError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [failedAccounts, setFailedAccounts] = useState<{ accountId: string; name: string; error: string }[]>([]);
   const [search, setSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -92,16 +93,21 @@ export function BulkOpsPanel() {
 
   const fetchContainers = useCallback(async () => {
     setContainersError(null);
+    setFailedAccounts([]);
     setLoadingContainers(true);
     try {
-      const res = await fetch("/api/gtm/accounts");
+      const res = await fetch("/api/gtm/accounts", { cache: "no-store" });
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
         setContainersError(data.error ?? "Unknown error");
         return;
       }
-      const data = (await res.json()) as { containers: GtmContainer[] };
+      const data = (await res.json()) as {
+        containers: GtmContainer[];
+        failedAccounts?: { accountId: string; name: string; error: string }[];
+      };
       setContainers(data.containers);
+      setFailedAccounts(data.failedAccounts ?? []);
       setLoaded(true);
     } catch {
       setContainersError("Failed to load the container list.");
@@ -354,6 +360,17 @@ export function BulkOpsPanel() {
         </div>
 
         {containersError && <ErrorBox>{containersError}</ErrorBox>}
+
+        {failedAccounts.length > 0 && (
+          <div className="mb-3 px-4 py-3 text-sm" style={{ background: "rgba(217,119,6,0.06)", border: "1px solid rgba(217,119,6,0.2)", color: "#d97706", borderRadius: R }}>
+            {failedAccounts.length} account(s) failed to load and are missing from the list below — click Refresh to retry:
+            <ul className="mt-1 text-xs" style={{ color: "#d97706" }}>
+              {failedAccounts.map((a) => (
+                <li key={a.accountId}>{a.name} ({a.accountId}): {a.error}</li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {loaded && !containersError && (
           <>

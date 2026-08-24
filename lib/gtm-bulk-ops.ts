@@ -107,6 +107,29 @@ class TriggerResolver {
   }
 }
 
+// Fields that identify WHERE a tag lives (account/container/workspace/tag
+// ID, its computed path, fingerprint, live URL). If the pasted JSON came
+// from an existing tag (exported, or copied from another container), these
+// point at that *source* container — spreading them onto a different
+// container's create/update request makes the GTM API reject it with
+// "Mismatched key with path or parent". They must always come from whatever
+// container is currently being written to, never from user input.
+const IDENTITY_FIELDS = [
+  "accountId",
+  "containerId",
+  "workspaceId",
+  "tagId",
+  "fingerprint",
+  "path",
+  "tagManagerUrl",
+] as const;
+
+function stripIdentityFields(obj: Record<string, unknown>): Record<string, unknown> {
+  const clone = { ...obj };
+  for (const field of IDENTITY_FIELDS) delete clone[field];
+  return clone;
+}
+
 async function upsertPublishTag(
   tm: tagmanager_v2.Tagmanager,
   parent: string,
@@ -115,7 +138,8 @@ async function upsertPublishTag(
   triggers: TriggerResolver,
   changes: string[]
 ): Promise<tagmanager_v2.Schema$Tag> {
-  const { firingTriggerName, ...tagFields } = spec;
+  const { firingTriggerName, ...rest } = spec;
+  const tagFields = stripIdentityFields(rest);
   const firingTriggerId = firingTriggerName ? [await triggers.resolve(firingTriggerName)] : undefined;
 
   const key = spec.name.trim().toLowerCase();

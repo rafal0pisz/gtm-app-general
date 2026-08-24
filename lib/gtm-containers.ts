@@ -1,3 +1,5 @@
+import { fetchWithRetry } from "@/lib/gtm-client";
+
 const GTM_BASE = "https://www.googleapis.com/tagmanager/v2";
 
 export interface ParsedContainerName {
@@ -13,6 +15,12 @@ export interface GtmContainerInfo {
   accountName: string;
   usageContext: string[];
   parsed: ParsedContainerName | null;
+}
+
+export interface FailedAccount {
+  accountId: string;
+  name: string;
+  error: string;
 }
 
 // Expected formats:
@@ -40,13 +48,21 @@ export function parseContainerName(name: string): ParsedContainerName | null {
   return null;
 }
 
-const BATCH_SIZE = 5;
-const BATCH_DELAY_MS = 1_000;
+const BATCH_SIZE = 3;
+const BATCH_DELAY_MS = 2_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function readErrorMessage(res: Response): Promise<string> {
+  const body = await res.text().catch(() => "");
+  return `HTTP ${res.status}${body ? `: ${body.slice(0, 300)}` : ""}`;
+}
+
+// Throws (rather than silently truncating) so a page fetch that fails after
+// retries are exhausted is visible to the caller instead of quietly leaving
+// this account's container list incomplete.
 async function fetchContainersForAccount(
   account: { accountId: string; name: string },
   accessToken: string
@@ -58,14 +74,9 @@ async function fetchContainersForAccount(
     const url = new URL(`${GTM_BASE}/accounts/${account.accountId}/containers`);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${accessToken}` } }, "containers.list");
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      console.warn(
-        `[gtm-containers] account ${account.accountId} (${account.name}): HTTP ${res.status}`,
-        body.slice(0, 200)
-      );
-      break;
+      throw new Error(await readErrorMessage(res));
     }
     const data = (await res.json()) as {
       container?: Array<{ containerId: string; publicId: string; name: string; usageContext?: string[] }>;
@@ -98,11 +109,9 @@ export async function fetchGtmAccountList(
     const url = new URL(`${GTM_BASE}/accounts`);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${accessToken}` } }, "accounts.list");
     if (!res.ok) {
-      const body = await res.text();
-      console.error(`[gtm-containers] accounts API returned HTTP ${res.status}`, body);
-      break;
+      throw new Error(`Failed to list GTM accounts (${await readErrorMessage(res)})`);
     }
     const data = (await res.json()) as {
       account?: Array<{ accountId: string; name: string }>;
@@ -115,11 +124,17 @@ export async function fetchGtmAccountList(
   return all.sort((a, b) => a.name.localeCompare(b.name, "pl"));
 }
 
-export async function fetchAllGtmContainers(accessToken: string): Promise<GtmContainerInfo[]> {
+export interface FetchAllContainersResult {
+  containers: GtmContainerInfo[];
+  failedAccounts: FailedAccount[];
+}
+
+export async function fetchAllGtmContainers(accessToken: string): Promise<FetchAllContainersResult> {
   const accounts = await fetchGtmAccountList(accessToken);
-  if (accounts.length === 0) return [];
+  if (accounts.length === 0) return { containers: [], failedAccounts: [] };
 
   const allContainers: GtmContainerInfo[] = [];
+  const failedAccounts: FailedAccount[] = [];
 
   for (let i = 0; i < accounts.length; i += BATCH_SIZE) {
     if (i > 0) await sleep(BATCH_DELAY_MS);
@@ -129,14 +144,17 @@ export async function fetchAllGtmContainers(accessToken: string): Promise<GtmCon
       batch.map((account) => fetchContainersForAccount(account, accessToken))
     );
 
-    for (const r of results) {
+    results.forEach((r, idx) => {
       if (r.status === "fulfilled") {
         allContainers.push(...r.value);
       } else {
-        console.warn("[gtm-containers] batch item threw:", r.reason);
+        const account = batch[idx];
+        const error = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        console.warn(`[gtm-containers] account ${account.accountId} (${account.name}) failed:`, error);
+        failedAccounts.push({ accountId: account.accountId, name: account.name, error });
       }
-    }
+    });
   }
 
-  return allContainers;
+  return { containers: allContainers, failedAccounts };
 }

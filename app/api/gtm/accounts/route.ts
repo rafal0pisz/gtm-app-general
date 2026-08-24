@@ -1,5 +1,5 @@
 import { getValidAccessToken } from "@/lib/gtm-session";
-import { fetchAllGtmContainers } from "@/lib/gtm-containers";
+import { fetchAllGtmContainers, type FailedAccount } from "@/lib/gtm-containers";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +23,7 @@ export async function GET() {
       );
     }
 
-    const containers = await fetchAllGtmContainers(session.accessToken);
+    const { containers, failedAccounts } = await fetchAllGtmContainers(session.accessToken);
     const result: GtmContainer[] = containers
       .map((c) => ({
         accountId: c.accountId,
@@ -36,7 +36,10 @@ export async function GET() {
       }))
       .sort((a, b) => a.containerName.localeCompare(b.containerName, "pl"));
 
-    return Response.json({ containers: result });
+    const response: { containers: GtmContainer[]; failedAccounts?: FailedAccount[] } = { containers: result };
+    if (failedAccounts.length > 0) response.failedAccounts = failedAccounts;
+
+    return Response.json(response);
   } catch (err) {
     console.error("[gtm/accounts] unhandled error:", err);
     return Response.json({ error: "Wewnętrzny błąd serwera." }, { status: 500 });

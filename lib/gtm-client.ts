@@ -64,3 +64,32 @@ export async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttem
     }
   }
 }
+
+// Same idea as withRetry(), but for the raw REST calls in gtm-containers.ts
+// (which don't go through the googleapis client, so errors show up as a
+// non-ok Response instead of a thrown exception).
+export async function fetchWithRetry(
+  url: string | URL,
+  init: RequestInit,
+  label: string,
+  maxAttempts = 6
+): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url, init);
+    if (res.ok || attempt >= maxAttempts) return res;
+
+    let isQuota = res.status === 429;
+    if (!isQuota) {
+      try {
+        isQuota = /quota exceeded/i.test(await res.clone().text());
+      } catch {
+        // ignore — treat as non-quota below
+      }
+    }
+    if (!isQuota) return res;
+
+    const delayMs = Math.min(20_000, 2 ** attempt * 1000);
+    console.warn(`[gtm] ${label} hit quota (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms`);
+    await sleep(delayMs);
+  }
+}
