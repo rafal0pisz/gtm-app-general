@@ -114,6 +114,10 @@ export async function fetchGtmAccountList(accessToken: string): Promise<GtmAccou
 
   do {
     const url = new URL(`${GTM_BASE}/accounts`);
+    // Without this, accounts associated with the newer unified "Google tag"
+    // setup are silently excluded from the list — a real gap, not just a
+    // pagination issue, and easy to mistake for one.
+    url.searchParams.set("includeGoogleTags", "true");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
     const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${accessToken}` } }, "accounts.list");
