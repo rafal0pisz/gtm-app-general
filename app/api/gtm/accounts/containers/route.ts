@@ -2,7 +2,7 @@ import { getValidAccessToken } from "@/lib/gtm-session";
 import { fetchContainersForAccounts, type FailedAccount } from "@/lib/gtm-containers";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 90;
 
 export interface GtmContainer {
   accountId: string;

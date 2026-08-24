@@ -11,7 +11,7 @@ const CHUNK_SIZE = 4;
 // How many accounts' containers to fetch per /api/gtm/accounts/containers
 // call — small enough that one call always finishes quickly regardless of
 // hosting time limits, however many accounts there are in total.
-const ACCOUNT_CHUNK_SIZE = 15;
+const ACCOUNT_CHUNK_SIZE = 10;
 
 interface ApplyResult {
   accountId: string;

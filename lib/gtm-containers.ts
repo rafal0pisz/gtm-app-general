@@ -83,7 +83,16 @@ async function fetchContainersForAccount(
     const url = new URL(`${GTM_BASE}/accounts/${account.accountId}/containers`);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
-    const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${accessToken}` } }, "containers.list");
+    // Tight budget: this runs concurrently (BATCH_SIZE at a time) inside a
+    // request that itself has a limited lifetime — a single call retrying
+    // for its full default budget could outlast the whole HTTP request and
+    // get killed with a bare 504 instead of a useful per-account error.
+    const res = await fetchWithRetry(
+      url,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+      "containers.list",
+      { budgetMs: 10_000 }
+    );
     if (!res.ok) {
       throw new Error(await readErrorMessage(res));
     }
@@ -120,7 +129,12 @@ export async function fetchGtmAccountList(accessToken: string): Promise<GtmAccou
     url.searchParams.set("includeGoogleTags", "true");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
-    const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${accessToken}` } }, "accounts.list");
+    const res = await fetchWithRetry(
+      url,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+      "accounts.list",
+      { budgetMs: 15_000 }
+    );
     if (!res.ok) {
       throw new Error(`Failed to list GTM accounts (${await readErrorMessage(res)})`);
     }

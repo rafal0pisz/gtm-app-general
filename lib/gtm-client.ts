@@ -51,21 +51,41 @@ function backoffDelay(attempt: number): number {
   return Math.round(base * (0.5 + Math.random()));
 }
 
+export interface RetryOptions {
+  maxAttempts?: number;
+  // Total wall-clock time (across all retries combined) this is allowed to
+  // spend backing off before giving up, even if maxAttempts hasn't been
+  // reached. Without this, a handful of concurrent calls each independently
+  // retrying up to ~50s can collectively outlast the serverless function's
+  // own time limit — which kills the request with a bare 504 and no useful
+  // error at all, worse than just failing fast and letting the caller
+  // (Refresh) retry the whole chunk in a fresh invocation.
+  budgetMs?: number;
+}
+
 // The Tag Manager API's default quota ("Queries per minute per user") is low
 // enough that a handful of containers with several tags each can trip it —
 // every call is against the same quota, regardless of which container it's
 // for. Rather than trying to stay under an unknown limit by tuning
 // concurrency alone, retry with backoff whenever Google reports the quota
 // was hit, so a run slows down instead of failing outright.
-export async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 6): Promise<T> {
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  label: string,
+  opts: RetryOptions = {}
+): Promise<T> {
+  const maxAttempts = opts.maxAttempts ?? 6;
+  const budgetMs = opts.budgetMs ?? 45_000;
+  const start = Date.now();
   for (let attempt = 1; ; attempt++) {
     try {
       return await fn();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const isQuota = /quota exceeded|rate limit exceeded|too many requests/i.test(message);
-      if (!isQuota || attempt >= maxAttempts) throw err;
-      const delayMs = backoffDelay(attempt);
+      const elapsed = Date.now() - start;
+      if (!isQuota || attempt >= maxAttempts || elapsed >= budgetMs) throw err;
+      const delayMs = Math.min(backoffDelay(attempt), budgetMs - elapsed);
       console.warn(`[gtm] ${label} hit quota (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms`);
       await sleep(delayMs);
     }
@@ -79,11 +99,15 @@ export async function fetchWithRetry(
   url: string | URL,
   init: RequestInit,
   label: string,
-  maxAttempts = 6
+  opts: RetryOptions = {}
 ): Promise<Response> {
+  const maxAttempts = opts.maxAttempts ?? 6;
+  const budgetMs = opts.budgetMs ?? 45_000;
+  const start = Date.now();
   for (let attempt = 1; ; attempt++) {
     const res = await fetch(url, init);
-    if (res.ok || attempt >= maxAttempts) return res;
+    const elapsed = Date.now() - start;
+    if (res.ok || attempt >= maxAttempts || elapsed >= budgetMs) return res;
 
     let isQuota = res.status === 429;
     if (!isQuota) {
@@ -95,7 +119,7 @@ export async function fetchWithRetry(
     }
     if (!isQuota) return res;
 
-    const delayMs = backoffDelay(attempt);
+    const delayMs = Math.min(backoffDelay(attempt), budgetMs - elapsed);
     console.warn(`[gtm] ${label} hit quota (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms`);
     await sleep(delayMs);
   }
