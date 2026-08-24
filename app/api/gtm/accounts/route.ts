@@ -13,7 +13,7 @@ export interface GtmContainer {
   parsed: { domain: string; countryCode: string } | null;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const session = await getValidAccessToken();
     if (!session) {
@@ -23,7 +23,15 @@ export async function GET() {
       );
     }
 
-    const { containers, failedAccounts } = await fetchAllGtmContainers(session.accessToken);
+    const idsParam = new URL(req.url).searchParams.get("ids");
+    const targetPublicIds = idsParam
+      ? new Set(idsParam.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean))
+      : undefined;
+
+    const { containers, failedAccounts, notFoundIds } = await fetchAllGtmContainers(
+      session.accessToken,
+      targetPublicIds
+    );
     const result: GtmContainer[] = containers
       .map((c) => ({
         accountId: c.accountId,
@@ -36,8 +44,13 @@ export async function GET() {
       }))
       .sort((a, b) => a.containerName.localeCompare(b.containerName, "pl"));
 
-    const response: { containers: GtmContainer[]; failedAccounts?: FailedAccount[] } = { containers: result };
+    const response: {
+      containers: GtmContainer[];
+      failedAccounts?: FailedAccount[];
+      notFoundIds?: string[];
+    } = { containers: result };
     if (failedAccounts.length > 0) response.failedAccounts = failedAccounts;
+    if (notFoundIds && notFoundIds.length > 0) response.notFoundIds = notFoundIds;
 
     return Response.json(response);
   } catch (err) {

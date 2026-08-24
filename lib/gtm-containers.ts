@@ -127,16 +127,32 @@ export async function fetchGtmAccountList(
 export interface FetchAllContainersResult {
   containers: GtmContainerInfo[];
   failedAccounts: FailedAccount[];
+  // Only set when targetPublicIds was given: any of those IDs never found in
+  // any scanned account (typo, wrong account, no access — surfaced instead
+  // of silently coming up short).
+  notFoundIds?: string[];
 }
 
-export async function fetchAllGtmContainers(accessToken: string): Promise<FetchAllContainersResult> {
+// When targetPublicIds is given, accounts are still scanned one batch at a
+// time (there's no way to look up a container by public ID without knowing
+// its account), but scanning stops as soon as every requested ID has been
+// found — for someone who already knows which ~50 of 100+ accounts they
+// need, this is usually much faster than the unfiltered full crawl.
+export async function fetchAllGtmContainers(
+  accessToken: string,
+  targetPublicIds?: Set<string>
+): Promise<FetchAllContainersResult> {
   const accounts = await fetchGtmAccountList(accessToken);
-  if (accounts.length === 0) return { containers: [], failedAccounts: [] };
+  if (accounts.length === 0) {
+    return { containers: [], failedAccounts: [], notFoundIds: targetPublicIds ? [...targetPublicIds] : undefined };
+  }
 
   const allContainers: GtmContainerInfo[] = [];
   const failedAccounts: FailedAccount[] = [];
+  const remaining = targetPublicIds ? new Set(targetPublicIds) : null;
 
   for (let i = 0; i < accounts.length; i += BATCH_SIZE) {
+    if (remaining && remaining.size === 0) break;
     if (i > 0) await sleep(BATCH_DELAY_MS);
 
     const batch = accounts.slice(i, i + BATCH_SIZE);
@@ -146,7 +162,12 @@ export async function fetchAllGtmContainers(accessToken: string): Promise<FetchA
 
     results.forEach((r, idx) => {
       if (r.status === "fulfilled") {
-        allContainers.push(...r.value);
+        for (const c of r.value) {
+          if (!remaining || remaining.has(c.publicId)) {
+            allContainers.push(c);
+            remaining?.delete(c.publicId);
+          }
+        }
       } else {
         const account = batch[idx];
         const error = r.reason instanceof Error ? r.reason.message : String(r.reason);
@@ -156,5 +177,5 @@ export async function fetchAllGtmContainers(accessToken: string): Promise<FetchA
     });
   }
 
-  return { containers: allContainers, failedAccounts };
+  return { containers: allContainers, failedAccounts, notFoundIds: remaining ? [...remaining] : undefined };
 }

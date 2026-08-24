@@ -60,6 +60,8 @@ export function BulkOpsPanel() {
   const [containersError, setContainersError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [failedAccounts, setFailedAccounts] = useState<{ accountId: string; name: string; error: string }[]>([]);
+  const [notFoundIds, setNotFoundIds] = useState<string[]>([]);
+  const [targetIdsRaw, setTargetIdsRaw] = useState("");
   const [search, setSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -94,9 +96,12 @@ export function BulkOpsPanel() {
   const fetchContainers = useCallback(async () => {
     setContainersError(null);
     setFailedAccounts([]);
+    setNotFoundIds([]);
     setLoadingContainers(true);
     try {
-      const res = await fetch("/api/gtm/accounts", { cache: "no-store" });
+      const ids = targetIdsRaw.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+      const url = ids.length > 0 ? `/api/gtm/accounts?ids=${encodeURIComponent(ids.join(","))}` : "/api/gtm/accounts";
+      const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
         setContainersError(data.error ?? "Unknown error");
@@ -105,16 +110,20 @@ export function BulkOpsPanel() {
       const data = (await res.json()) as {
         containers: GtmContainer[];
         failedAccounts?: { accountId: string; name: string; error: string }[];
+        notFoundIds?: string[];
       };
       setContainers(data.containers);
       setFailedAccounts(data.failedAccounts ?? []);
+      setNotFoundIds(data.notFoundIds ?? []);
+      // Targeted lookup (specific IDs pasted in) implies "I want these" — pre-select them all.
+      if (ids.length > 0) setSelected(new Set(data.containers.map((c) => c.publicId)));
       setLoaded(true);
     } catch {
       setContainersError("Failed to load the container list.");
     } finally {
       setLoadingContainers(false);
     }
-  }, []);
+  }, [targetIdsRaw]);
 
   const accounts = useMemo(() => {
     const seen = new Map<string, string>();
@@ -329,6 +338,18 @@ export function BulkOpsPanel() {
     <div className="flex flex-col gap-8">
       {/* ── Step 1: containers ─────────────────────────────────────────── */}
       <Section title="1. Select containers">
+        <div className="mb-3">
+          <Field label="Container public IDs (optional — GTM-XXXXXXX, one per line or comma-separated). Skips scanning every account you have access to; only looks for these.">
+            <textarea
+              value={targetIdsRaw}
+              onChange={(e) => setTargetIdsRaw(e.target.value)}
+              rows={3}
+              placeholder={"GTM-ABCD123\nGTM-EFGH456"}
+              style={{ ...inputStyle, fontFamily: "var(--font-mono)", resize: "vertical" }}
+            />
+          </Field>
+        </div>
+
         <div className="flex items-center gap-3 flex-wrap mb-3">
           <input
             type="text"
@@ -360,6 +381,12 @@ export function BulkOpsPanel() {
         </div>
 
         {containersError && <ErrorBox>{containersError}</ErrorBox>}
+
+        {notFoundIds.length > 0 && (
+          <div className="mb-3 px-4 py-3 text-sm" style={{ background: "rgba(220,38,38,0.06)", border: "1px solid rgba(220,38,38,0.2)", color: "var(--error)", borderRadius: R }}>
+            Not found (checked every account you have access to): {notFoundIds.join(", ")}
+          </div>
+        )}
 
         {failedAccounts.length > 0 && (
           <div className="mb-3 px-4 py-3 text-sm" style={{ background: "rgba(217,119,6,0.06)", border: "1px solid rgba(217,119,6,0.2)", color: "#d97706", borderRadius: R }}>
