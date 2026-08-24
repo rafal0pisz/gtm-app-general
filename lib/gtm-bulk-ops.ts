@@ -8,11 +8,15 @@ export interface BulkTarget {
 }
 
 export interface BulkTagSpec {
+  // Arbitrary GTM Tag fields (name, type, parameter, notes, priority,
+  // consentSettings, ...) — pasted in as-is by the user, sent through to the
+  // GTM API mostly unmodified. `name` is required: it's how an existing tag
+  // with the same name is found for update instead of creating a duplicate.
   name: string;
-  type: string;
-  parameter?: Array<{ type: string; key: string; value?: string }>;
+  [key: string]: unknown;
+  // Not a GTM API field — resolved per-container to a firingTriggerId,
+  // since trigger IDs aren't portable across containers.
   firingTriggerName?: string;
-  notes?: string;
 }
 
 export interface BulkApplyOptions {
@@ -96,8 +100,9 @@ async function upsertPublishTag(
   existingTags: tagmanager_v2.Schema$Tag[],
   changes: string[]
 ): Promise<void> {
-  const firingTriggerId = spec.firingTriggerName
-    ? [await findTriggerIdByName(tm, parent, spec.firingTriggerName)]
+  const { firingTriggerName, ...tagFields } = spec;
+  const firingTriggerId = firingTriggerName
+    ? [await findTriggerIdByName(tm, parent, firingTriggerName)]
     : undefined;
 
   const existing = existingTags.find(
@@ -110,10 +115,7 @@ async function upsertPublishTag(
     })).data;
     const merged: tagmanager_v2.Schema$Tag = {
       ...full,
-      name: spec.name,
-      type: spec.type,
-      parameter: spec.parameter ?? full.parameter,
-      notes: spec.notes ?? full.notes,
+      ...tagFields,
       ...(firingTriggerId ? { firingTriggerId } : {}),
     };
     await tm.accounts.containers.workspaces.tags.update({
@@ -124,13 +126,7 @@ async function upsertPublishTag(
   } else {
     const created = (await tm.accounts.containers.workspaces.tags.create({
       parent,
-      requestBody: {
-        name: spec.name,
-        type: spec.type,
-        parameter: spec.parameter,
-        notes: spec.notes,
-        firingTriggerId,
-      },
+      requestBody: { ...tagFields, ...(firingTriggerId ? { firingTriggerId } : {}) },
     })).data;
     changes.push(`Tag "${spec.name}" created (tagId ${created.tagId})`);
   }

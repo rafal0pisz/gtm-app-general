@@ -51,45 +51,68 @@ async function fetchContainersForAccount(
   account: { accountId: string; name: string },
   accessToken: string
 ): Promise<GtmContainerInfo[]> {
-  const res = await fetch(
-    `${GTM_BASE}/accounts/${account.accountId}/containers`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    console.warn(
-      `[gtm-containers] account ${account.accountId} (${account.name}): HTTP ${res.status}`,
-      body.slice(0, 200)
+  const all: GtmContainerInfo[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const url = new URL(`${GTM_BASE}/accounts/${account.accountId}/containers`);
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.warn(
+        `[gtm-containers] account ${account.accountId} (${account.name}): HTTP ${res.status}`,
+        body.slice(0, 200)
+      );
+      break;
+    }
+    const data = (await res.json()) as {
+      container?: Array<{ containerId: string; publicId: string; name: string; usageContext?: string[] }>;
+      nextPageToken?: string;
+    };
+    all.push(
+      ...(data.container ?? []).map<GtmContainerInfo>((c) => ({
+        publicId: c.publicId,
+        accountId: account.accountId,
+        containerId: c.containerId,
+        containerName: c.name,
+        accountName: account.name,
+        usageContext: c.usageContext ?? [],
+        parsed: parseContainerName(c.name),
+      }))
     );
-    return [];
-  }
-  const data = (await res.json()) as {
-    container?: Array<{ containerId: string; publicId: string; name: string; usageContext?: string[] }>;
-  };
-  return (data.container ?? []).map<GtmContainerInfo>((c) => ({
-    publicId: c.publicId,
-    accountId: account.accountId,
-    containerId: c.containerId,
-    containerName: c.name,
-    accountName: account.name,
-    usageContext: c.usageContext ?? [],
-    parsed: parseContainerName(c.name),
-  }));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return all;
 }
 
 export async function fetchGtmAccountList(
   accessToken: string
 ): Promise<Array<{ accountId: string; name: string }>> {
-  const res = await fetch(`${GTM_BASE}/accounts`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`[gtm-containers] accounts API returned HTTP ${res.status}`, body);
-    return [];
-  }
-  const data = (await res.json()) as { account?: Array<{ accountId: string; name: string }> };
-  return (data.account ?? []).sort((a, b) => a.name.localeCompare(b.name, "pl"));
+  const all: Array<{ accountId: string; name: string }> = [];
+  let pageToken: string | undefined;
+
+  do {
+    const url = new URL(`${GTM_BASE}/accounts`);
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) {
+      const body = await res.text();
+      console.error(`[gtm-containers] accounts API returned HTTP ${res.status}`, body);
+      break;
+    }
+    const data = (await res.json()) as {
+      account?: Array<{ accountId: string; name: string }>;
+      nextPageToken?: string;
+    };
+    all.push(...(data.account ?? []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return all.sort((a, b) => a.name.localeCompare(b.name, "pl"));
 }
 
 export async function fetchAllGtmContainers(accessToken: string): Promise<GtmContainerInfo[]> {

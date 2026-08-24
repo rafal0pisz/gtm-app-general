@@ -44,9 +44,7 @@ export function BulkOpsPanel() {
 
   // ── Publish-tag form ────────────────────────────────────────────────────
   const [publishEnabled, setPublishEnabled] = useState(true);
-  const [tagName, setTagName] = useState("");
-  const [tagType, setTagType] = useState("html");
-  const [scriptHtml, setScriptHtml] = useState("");
+  const [tagJsonText, setTagJsonText] = useState("");
   const [firingTriggerName, setFiringTriggerName] = useState("All Pages");
 
   // ── Pause-tags form ─────────────────────────────────────────────────────
@@ -136,15 +134,13 @@ export function BulkOpsPanel() {
   const canApply =
     selected.size > 0 &&
     !applying &&
-    ((publishEnabled && tagName.trim() && scriptHtml.trim()) ||
-      (pauseEnabled && pauseNamesRaw.trim()));
+    ((publishEnabled && tagJsonText.trim()) || (pauseEnabled && pauseNamesRaw.trim()));
 
   const handleApply = async () => {
     setApplyError(null);
     setApplyResults([]);
     setSelectedForPublish(new Set());
     setPublishResults([]);
-    setApplying(true);
 
     const targets = containers
       .filter((c) => selected.has(c.publicId))
@@ -154,20 +150,23 @@ export function BulkOpsPanel() {
       ? pauseNamesRaw.split(/[\n,]/).map((s) => s.trim()).filter(Boolean)
       : [];
 
-    const publishTag = publishEnabled
-      ? {
-          name: tagName.trim(),
-          type: tagType.trim() || "html",
-          parameter:
-            tagType.trim() === "html" || !tagType.trim()
-              ? [
-                  { type: "template", key: "html", value: scriptHtml },
-                  { type: "boolean", key: "supportDocumentWrite", value: "false" },
-                ]
-              : undefined,
-          firingTriggerName: firingTriggerName.trim() || undefined,
-        }
-      : undefined;
+    let publishTag: Record<string, unknown> | undefined;
+    if (publishEnabled) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(tagJsonText);
+      } catch {
+        setApplyError("Tag JSON jest niepoprawny — nie da się go sparsować.");
+        return;
+      }
+      if (typeof parsed !== "object" || parsed === null || typeof (parsed as { name?: unknown }).name !== "string") {
+        setApplyError('Tag JSON musi być obiektem z co najmniej polem "name" (string).');
+        return;
+      }
+      publishTag = { ...(parsed as Record<string, unknown>), firingTriggerName: firingTriggerName.trim() || undefined };
+    }
+
+    setApplying(true);
 
     const finalVersionName = versionName.trim() || `Bulk update ${new Date().toISOString()}`;
 
@@ -371,22 +370,31 @@ export function BulkOpsPanel() {
         </label>
         {publishEnabled && (
           <div className="flex flex-col gap-3 mb-6 pl-6">
-            <Field label="Tag name (used to find an existing tag with the same name)">
-              <input value={tagName} onChange={(e) => setTagName(e.target.value)} placeholder="e.g. Custom Script - Consent Banner" style={inputStyle} />
+            <Field label='Tag JSON (must include at least "name" and "type" — the exact GTM Tag object you already have prepared)'>
+              <textarea
+                value={tagJsonText}
+                onChange={(e) => setTagJsonText(e.target.value)}
+                rows={12}
+                placeholder={JSON.stringify(
+                  {
+                    name: "Custom Script - Consent Banner",
+                    type: "html",
+                    parameter: [
+                      { type: "template", key: "html", value: "<script>...</script>" },
+                      { type: "boolean", key: "supportDocumentWrite", value: "false" },
+                    ],
+                  },
+                  null,
+                  2
+                )}
+                style={{ ...inputStyle, fontFamily: "var(--font-mono)", resize: "vertical" }}
+              />
             </Field>
-            <Field label="Tag type">
-              <input value={tagType} onChange={(e) => setTagType(e.target.value)} placeholder="html" style={inputStyle} />
-            </Field>
-            {tagType.trim() === "html" || !tagType.trim() ? (
-              <Field label="Script (Custom HTML)">
-                <textarea value={scriptHtml} onChange={(e) => setScriptHtml(e.target.value)} rows={8} placeholder="<script>...</script>" style={{ ...inputStyle, fontFamily: "var(--font-mono)", resize: "vertical" }} />
-              </Field>
-            ) : (
-              <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                Non-HTML tag types are created without parameters here — edit the tag manually in GTM afterwards if it needs them.
-              </p>
-            )}
-            <Field label="Firing trigger name (only used when the tag doesn't exist yet)">
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              Matched to an existing tag by <code>name</code> (case-insensitive) → updated; otherwise created new.
+              Don&apos;t include <code>firingTriggerId</code> — trigger IDs aren&apos;t portable across containers, use the field below instead.
+            </p>
+            <Field label="Firing trigger name (only used when the tag doesn't exist yet — resolved per container)">
               <input value={firingTriggerName} onChange={(e) => setFiringTriggerName(e.target.value)} placeholder="All Pages" style={inputStyle} />
             </Field>
           </div>
