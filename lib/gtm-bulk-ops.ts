@@ -169,11 +169,28 @@ class CustomTemplateResolver {
       );
       this.sourceTemplates = res.data.template ?? [];
     }
-    const sourceTemplateId = match[1];
-    const sourceTemplate = this.sourceTemplates.find((t) => t.templateId === sourceTemplateId);
+    // The exact encoding of a custom-template tag's `type` isn't documented,
+    // so try several plausible candidates against what a workspace's
+    // templates.list() actually returns, instead of assuming one is right.
+    const suffix = match[1];
+    const beforeUnderscore = suffix.split("_")[0];
+    const sourceTemplate = this.sourceTemplates.find(
+      (t) =>
+        t.templateId === suffix ||
+        t.templateId === beforeUnderscore ||
+        t.galleryReference?.galleryTemplateId === suffix ||
+        t.galleryReference?.galleryTemplateId === beforeUnderscore
+    );
     if (!sourceTemplate) {
+      const available = this.sourceTemplates
+        .map(
+          (t) =>
+            `"${t.name}" (templateId=${t.templateId}, galleryTemplateId=${t.galleryReference?.galleryTemplateId ?? "—"})`
+        )
+        .join("; ");
       throw new Error(
-        `Custom template for type "${sourceType}" was not found in the source container's workspace.`
+        `Custom template for type "${sourceType}" was not found in the source container's workspace. ` +
+          `Templates present there: ${available || "(none)"}`
       );
     }
 
@@ -196,7 +213,7 @@ class CustomTemplateResolver {
       this.targetTemplates.push(targetTemplate);
     }
     if (!targetTemplate.templateId) {
-      throw new Error(`Failed to import custom template "${sourceTemplate.name ?? sourceTemplateId}" into this container.`);
+      throw new Error(`Failed to import custom template "${sourceTemplate.name ?? suffix}" into this container.`);
     }
 
     const targetType = `cvt_${targetTemplate.templateId}`;
