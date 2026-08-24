@@ -51,6 +51,41 @@ function backoffDelay(attempt: number): number {
   return Math.round(base * (0.5 + Math.random()));
 }
 
+// The Tag Manager API's "Queries per minute per user" quota is shared across
+// every call this process makes — reads and writes, any account or
+// container. Firing several accounts' worth of calls concurrently (even just
+// 10 at once) can burst well past that quota before any 429 comes back to
+// react to, and retry-with-backoff alone doesn't fix that: every retrying
+// call backs off independently, so the *combined* dispatch rate across all
+// of them can stay above the limit indefinitely instead of settling under
+// it. A single process-wide gate that paces the actual moment each HTTP
+// call goes out — not how many are in flight — keeps the real request rate
+// under the quota regardless of how much concurrency callers throw at it.
+const RATE_LIMIT_INTERVAL_MS = Number(process.env.GTM_RATE_LIMIT_MS) || 500;
+
+class RateLimiter {
+  private queue: Promise<void> = Promise.resolve();
+  private lastDispatch = 0;
+
+  constructor(private minIntervalMs: number) {}
+
+  // Reserves the next available dispatch slot and resolves once it arrives.
+  // Only the *waiting* is serialized here — the caller's own call still runs
+  // (and can take as long as it likes) after this resolves, so slow calls
+  // don't back up the queue for everyone else.
+  async waitForSlot(): Promise<void> {
+    const mySlot = this.queue.then(async () => {
+      const wait = Math.max(0, this.lastDispatch + this.minIntervalMs - Date.now());
+      if (wait > 0) await sleep(wait);
+      this.lastDispatch = Date.now();
+    });
+    this.queue = mySlot;
+    await mySlot;
+  }
+}
+
+const gtmRateLimiter = new RateLimiter(RATE_LIMIT_INTERVAL_MS);
+
 export interface RetryOptions {
   maxAttempts?: number;
   // Total wall-clock time (across all retries combined) this is allowed to
@@ -79,6 +114,7 @@ export async function withRetry<T>(
   const start = Date.now();
   for (let attempt = 1; ; attempt++) {
     try {
+      await gtmRateLimiter.waitForSlot();
       return await fn();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -105,6 +141,7 @@ export async function fetchWithRetry(
   const budgetMs = opts.budgetMs ?? 45_000;
   const start = Date.now();
   for (let attempt = 1; ; attempt++) {
+    await gtmRateLimiter.waitForSlot();
     const res = await fetch(url, init);
     const elapsed = Date.now() - start;
     if (res.ok || attempt >= maxAttempts || elapsed >= budgetMs) return res;

@@ -53,17 +53,6 @@ export function parseContainerName(name: string): ParsedContainerName | null {
   return null;
 }
 
-// Read-only listing calls are cheap individually, and quota errors now
-// retry with backoff on their own — so scan fairly aggressively by default
-// and let the retry logic absorb whatever quota hits that causes, rather
-// than always paying a large fixed delay whether or not it was needed.
-const BATCH_SIZE = 10;
-const BATCH_DELAY_MS = 300;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function readErrorMessage(res: Response): Promise<string> {
   const body = await res.text().catch(() => "");
   return `HTTP ${res.status}${body ? `: ${body.slice(0, 300)}` : ""}`;
@@ -83,15 +72,15 @@ async function fetchContainersForAccount(
     const url = new URL(`${GTM_BASE}/accounts/${account.accountId}/containers`);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
-    // Tight budget: this runs concurrently (BATCH_SIZE at a time) inside a
-    // request that itself has a limited lifetime — a single call retrying
-    // for its full default budget could outlast the whole HTTP request and
-    // get killed with a bare 504 instead of a useful per-account error.
+    // Every account in the batch fires this concurrently, but the shared
+    // rate limiter in fetchWithRetry paces the actual outbound requests, so
+    // this budget just needs enough room to wait its turn in a large batch
+    // plus a few retries — not to outlast the whole HTTP request.
     const res = await fetchWithRetry(
       url,
       { headers: { Authorization: `Bearer ${accessToken}` } },
       "containers.list",
-      { budgetMs: 10_000 }
+      { budgetMs: 25_000 }
     );
     if (!res.ok) {
       throw new Error(await readErrorMessage(res));
@@ -133,7 +122,7 @@ export async function fetchGtmAccountList(accessToken: string): Promise<GtmAccou
       url,
       { headers: { Authorization: `Bearer ${accessToken}` } },
       "accounts.list",
-      { budgetMs: 15_000 }
+      { budgetMs: 20_000 }
     );
     if (!res.ok) {
       throw new Error(`Failed to list GTM accounts (${await readErrorMessage(res)})`);
@@ -159,6 +148,11 @@ export interface FetchContainersResult {
 // decides how big that slice is, which keeps any single HTTP round-trip
 // short and safely inside any hosting platform's function time limit,
 // however many accounts there are in total across repeated calls.
+//
+// All accounts in the slice are launched together rather than in staggered
+// sub-batches: the shared rate limiter inside fetchWithRetry is what
+// actually paces the outbound requests now, so an extra layer of manual
+// batching here would only add latency without adding safety.
 export async function fetchContainersForAccounts(
   accessToken: string,
   accounts: GtmAccountInfo[]
@@ -166,25 +160,20 @@ export async function fetchContainersForAccounts(
   const containers: GtmContainerInfo[] = [];
   const failedAccounts: FailedAccount[] = [];
 
-  for (let i = 0; i < accounts.length; i += BATCH_SIZE) {
-    if (i > 0) await sleep(BATCH_DELAY_MS);
+  const results = await Promise.allSettled(
+    accounts.map((account) => fetchContainersForAccount(account, accessToken))
+  );
 
-    const batch = accounts.slice(i, i + BATCH_SIZE);
-    const results = await Promise.allSettled(
-      batch.map((account) => fetchContainersForAccount(account, accessToken))
-    );
-
-    results.forEach((r, idx) => {
-      if (r.status === "fulfilled") {
-        containers.push(...r.value);
-      } else {
-        const account = batch[idx];
-        const error = r.reason instanceof Error ? r.reason.message : String(r.reason);
-        console.warn(`[gtm-containers] account ${account.accountId} (${account.name}) failed:`, error);
-        failedAccounts.push({ accountId: account.accountId, name: account.name, error });
-      }
-    });
-  }
+  results.forEach((r, idx) => {
+    if (r.status === "fulfilled") {
+      containers.push(...r.value);
+    } else {
+      const account = accounts[idx];
+      const error = r.reason instanceof Error ? r.reason.message : String(r.reason);
+      console.warn(`[gtm-containers] account ${account.accountId} (${account.name}) failed:`, error);
+      failedAccounts.push({ accountId: account.accountId, name: account.name, error });
+    }
+  });
 
   return { containers, failedAccounts };
 }

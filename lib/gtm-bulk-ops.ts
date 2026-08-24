@@ -468,72 +468,126 @@ export async function bulkPublish(
   return runInBatches(targets, (target) => publishOne(tm, target));
 }
 
-export interface ContainerVersionSummary {
-  versionId: string;
+export interface WorkspaceSummary {
+  workspaceId: string;
   name: string;
-  numTags?: string;
-  numTriggers?: string;
-  numVariables?: string;
+  description?: string;
 }
 
-export interface ContainerVersionsResult {
+export interface ContainerWorkspacesResult {
   accountId: string;
   containerId: string;
   containerName: string;
-  versions: ContainerVersionSummary[];
-  liveVersionId?: string;
+  workspaces: WorkspaceSummary[];
   error?: string;
 }
 
-async function fetchVersionsForContainer(
+async function fetchWorkspacesForContainer(
   tm: tagmanager_v2.Tagmanager,
   target: BulkTarget
-): Promise<ContainerVersionsResult> {
+): Promise<ContainerWorkspacesResult> {
   try {
     const parent = `accounts/${target.accountId}/containers/${target.containerId}`;
-
-    const [headersRes, liveVersionId] = await Promise.all([
-      withRetry(() => tm.accounts.containers.version_headers.list({ parent }), "version_headers.list"),
-      withRetry(() => tm.accounts.containers.versions.live({ parent }), "versions.live")
-        .then((res) => res.data.containerVersionId ?? undefined)
-        // A brand-new, never-published container has no live version — that's
-        // not a failure, just nothing to mark as currently live.
-        .catch(() => undefined),
-    ]);
-
-    const versions: ContainerVersionSummary[] = (headersRes.data.containerVersionHeader ?? [])
-      .filter((v) => !v.deleted && v.containerVersionId)
-      .map((v) => ({
-        versionId: v.containerVersionId!,
-        name: v.name || `Version ${v.containerVersionId}`,
-        numTags: v.numTags ?? undefined,
-        numTriggers: v.numTriggers ?? undefined,
-        numVariables: v.numVariables ?? undefined,
-      }))
-      .sort((a, b) => Number(b.versionId) - Number(a.versionId));
+    const res = await withRetry(
+      () => tm.accounts.containers.workspaces.list({ parent }),
+      "workspaces.list",
+      { budgetMs: 15_000 }
+    );
+    const workspaces: WorkspaceSummary[] = (res.data.workspace ?? [])
+      .filter((w) => w.workspaceId)
+      .map((w) => ({
+        workspaceId: w.workspaceId!,
+        name: w.name || `Workspace ${w.workspaceId}`,
+        description: w.description ?? undefined,
+      }));
 
     return {
       accountId: target.accountId,
       containerId: target.containerId,
       containerName: target.containerName,
-      versions,
-      liveVersionId,
+      workspaces,
     };
   } catch (err) {
     return {
       accountId: target.accountId,
       containerId: target.containerId,
       containerName: target.containerName,
-      versions: [],
+      workspaces: [],
       error: err instanceof Error ? err.message : String(err),
     };
   }
 }
 
-export async function bulkListVersions(
+export async function bulkListWorkspaces(
   accessToken: string,
   targets: BulkTarget[]
-): Promise<ContainerVersionsResult[]> {
+): Promise<ContainerWorkspacesResult[]> {
   const tm = tagmanagerClient(accessToken);
-  return runInBatches(targets, (target) => fetchVersionsForContainer(tm, target));
+  return runInBatches(targets, (target) => fetchWorkspacesForContainer(tm, target));
+}
+
+export interface CreateVersionTarget {
+  accountId: string;
+  containerId: string;
+  containerName: string;
+  workspaceId: string;
+}
+
+export interface CreateVersionResult {
+  accountId: string;
+  containerId: string;
+  containerName: string;
+  status: "ok" | "error";
+  versionId?: string;
+  versionName?: string;
+  error?: string;
+}
+
+// Snapshots whatever is currently in the given workspace into a new
+// container version — no tag edits, just "turn this draft into a
+// version," e.g. for a workspace someone else already finished editing.
+async function createVersionFromWorkspace(
+  tm: tagmanager_v2.Tagmanager,
+  target: CreateVersionTarget,
+  versionName: string,
+  versionNotes: string | undefined
+): Promise<CreateVersionResult> {
+  try {
+    const parent = workspacePath(target.accountId, target.containerId, target.workspaceId);
+    const versionRes = await withRetry(
+      () =>
+        tm.accounts.containers.workspaces.create_version({
+          path: parent,
+          requestBody: { name: versionName, notes: versionNotes },
+        }),
+      "workspaces.create_version"
+    );
+    const version = versionRes.data.containerVersion;
+    return {
+      accountId: target.accountId,
+      containerId: target.containerId,
+      containerName: target.containerName,
+      status: "ok",
+      versionId: version?.containerVersionId ?? undefined,
+      versionName: version?.name ?? versionName,
+    };
+  } catch (err) {
+    return {
+      accountId: target.accountId,
+      containerId: target.containerId,
+      containerName: target.containerName,
+      status: "error",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function bulkCreateVersionsFromWorkspaces(
+  accessToken: string,
+  targets: CreateVersionTarget[],
+  versionName: string,
+  versionNotes: string | undefined
+): Promise<CreateVersionResult[]> {
+  const tm = tagmanagerClient(accessToken);
+  return runInBatches(targets, (target) => createVersionFromWorkspace(tm, target, versionName, versionNotes));
 }

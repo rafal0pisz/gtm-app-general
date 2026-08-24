@@ -11,7 +11,7 @@ const CHUNK_SIZE = 4;
 // How many accounts' containers to fetch per /api/gtm/accounts/containers
 // call — small enough that one call always finishes quickly regardless of
 // hosting time limits, however many accounts there are in total.
-const ACCOUNT_CHUNK_SIZE = 10;
+const ACCOUNT_CHUNK_SIZE = 25;
 
 interface ApplyResult {
   accountId: string;
@@ -33,12 +33,21 @@ interface PublishResult {
   error?: string;
 }
 
-interface ContainerVersionsRow {
+interface ContainerWorkspacesRow {
   accountId: string;
   containerId: string;
   containerName: string;
-  versions: { versionId: string; name: string; numTags?: string; numTriggers?: string; numVariables?: string }[];
-  liveVersionId?: string;
+  workspaces: { workspaceId: string; name: string; description?: string }[];
+  error?: string;
+}
+
+interface CreateVersionResult {
+  accountId: string;
+  containerId: string;
+  containerName: string;
+  status: "ok" | "error";
+  versionId?: string;
+  versionName?: string;
   error?: string;
 }
 
@@ -108,16 +117,20 @@ export function BulkOpsPanel() {
   const [publishResults, setPublishResults] = useState<PublishResult[]>([]);
   const [publishError, setPublishError] = useState<string | null>(null);
 
-  // ── Publish an existing version (independent of Apply/Publish above) ────
-  const [versionsResults, setVersionsResults] = useState<ContainerVersionsRow[]>([]);
-  const [versionsLoading, setVersionsLoading] = useState(false);
-  const [versionsProgress, setVersionsProgress] = useState<{ done: number; total: number } | null>(null);
-  const [chosenVersion, setChosenVersion] = useState<Map<string, string>>(new Map());
+  // ── Publish from an existing workspace (independent of Apply/Publish above) ─
+  const [workspacesResults, setWorkspacesResults] = useState<ContainerWorkspacesRow[]>([]);
+  const [workspacesLoading, setWorkspacesLoading] = useState(false);
+  const [workspacesProgress, setWorkspacesProgress] = useState<{ done: number; total: number } | null>(null);
+  const [chosenWorkspace, setChosenWorkspace] = useState<Map<string, string>>(new Map());
+  const [workspaceVersionName, setWorkspaceVersionName] = useState("");
+  const [workspaceVersionNotes, setWorkspaceVersionNotes] = useState("");
+  const [creatingVersions, setCreatingVersions] = useState(false);
+  const [createVersionProgress, setCreateVersionProgress] = useState<{ done: number; total: number } | null>(null);
+  const [createVersionResults, setCreateVersionResults] = useState<CreateVersionResult[]>([]);
   const [confirmingVersionPublish, setConfirmingVersionPublish] = useState(false);
   const [versionPublishing, setVersionPublishing] = useState(false);
   const [versionPublishProgress, setVersionPublishProgress] = useState<{ done: number; total: number } | null>(null);
   const [versionPublishResults, setVersionPublishResults] = useState<PublishResult[]>([]);
-  const [versionPublishError, setVersionPublishError] = useState<string | null>(null);
 
   const fetchContainers = useCallback(async () => {
     setContainersError(null);
@@ -429,62 +442,114 @@ export function BulkOpsPanel() {
     setPublishing(false);
   };
 
-  const loadVersions = async () => {
-    setVersionsResults([]);
-    setChosenVersion(new Map());
+  const loadWorkspaces = async () => {
+    setWorkspacesResults([]);
+    setChosenWorkspace(new Map());
+    setCreateVersionResults([]);
     setVersionPublishResults([]);
-    setVersionsLoading(true);
+    setWorkspacesLoading(true);
 
     const targets = containers
       .filter((c) => selected.has(c.publicId))
       .map((c) => ({ accountId: c.accountId, containerId: c.containerId, containerName: c.containerName }));
 
-    setVersionsProgress({ done: 0, total: targets.length });
-    const results: ContainerVersionsRow[] = [];
+    setWorkspacesProgress({ done: 0, total: targets.length });
+    const results: ContainerWorkspacesRow[] = [];
     const defaults = new Map<string, string>();
 
     for (const batch of chunk(targets, CHUNK_SIZE)) {
       try {
-        const res = await fetch("/api/gtm/bulk/versions", {
+        const res = await fetch("/api/gtm/bulk/workspaces", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ targets: batch }),
         });
         if (res.ok) {
-          const data = (await res.json()) as { results: ContainerVersionsRow[] };
+          const data = (await res.json()) as { results: ContainerWorkspacesRow[] };
           results.push(...data.results);
           for (const r of data.results) {
-            if (r.versions[0]) defaults.set(r.containerId, r.versions[0].versionId);
+            const preferred = r.workspaces.find((w) => w.name === "Default Workspace") ?? r.workspaces[0];
+            if (preferred) defaults.set(r.containerId, preferred.workspaceId);
           }
         } else {
           const data = (await res.json().catch(() => ({}))) as { error?: string };
-          results.push(...batch.map((t) => ({ ...t, versions: [], error: data.error ?? `HTTP ${res.status}` })));
+          results.push(...batch.map((t) => ({ ...t, workspaces: [], error: data.error ?? `HTTP ${res.status}` })));
         }
       } catch {
-        results.push(...batch.map((t) => ({ ...t, versions: [], error: "Network error." })));
+        results.push(...batch.map((t) => ({ ...t, workspaces: [], error: "Network error." })));
       }
-      setVersionsResults([...results]);
-      setChosenVersion(new Map(defaults));
-      setVersionsProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
+      setWorkspacesResults([...results]);
+      setChosenWorkspace(new Map(defaults));
+      setWorkspacesProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
     }
 
-    setVersionsLoading(false);
+    setWorkspacesLoading(false);
   };
 
-  const handlePublishChosenVersions = async () => {
-    setVersionPublishError(null);
+  const handleCreateVersions = async () => {
+    setCreateVersionResults([]);
     setVersionPublishResults([]);
-    setVersionPublishing(true);
-    setConfirmingVersionPublish(false);
+    setCreatingVersions(true);
 
-    const targets = versionsResults
-      .filter((r) => !r.error && chosenVersion.get(r.containerId))
+    const finalVersionName = workspaceVersionName.trim() || `Bulk publish ${new Date().toISOString()}`;
+
+    const targets = workspacesResults
+      .filter((r) => !r.error && chosenWorkspace.get(r.containerId))
       .map((r) => ({
         accountId: r.accountId,
         containerId: r.containerId,
         containerName: r.containerName,
-        versionId: chosenVersion.get(r.containerId)!,
+        workspaceId: chosenWorkspace.get(r.containerId)!,
       }));
+
+    setCreateVersionProgress({ done: 0, total: targets.length });
+
+    for (const batch of chunk(targets, CHUNK_SIZE)) {
+      try {
+        const res = await fetch("/api/gtm/bulk/create-version", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            targets: batch,
+            versionName: finalVersionName,
+            versionNotes: workspaceVersionNotes.trim() || undefined,
+          }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { results: CreateVersionResult[] };
+          setCreateVersionResults((prev) => [...prev, ...data.results]);
+        } else {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          setCreateVersionResults((prev) => [
+            ...prev,
+            ...batch.map((t) => ({ ...t, status: "error" as const, error: data.error ?? `HTTP ${res.status}` })),
+          ]);
+        }
+      } catch {
+        setCreateVersionResults((prev) => [
+          ...prev,
+          ...batch.map((t) => ({ ...t, status: "error" as const, error: "Network error." })),
+        ]);
+      }
+      setCreateVersionProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
+    }
+
+    setCreatingVersions(false);
+  };
+
+  const readyToPublishFromWorkspaces = createVersionResults.filter((r) => r.status === "ok" && r.versionId);
+
+  const handlePublishFromWorkspaces = async () => {
+    setVersionPublishResults([]);
+    setVersionPublishing(true);
+    setConfirmingVersionPublish(false);
+
+    const targets = readyToPublishFromWorkspaces.map((r) => ({
+      accountId: r.accountId,
+      containerId: r.containerId,
+      containerName: r.containerName,
+      versionId: r.versionId!,
+    }));
 
     setVersionPublishProgress({ done: 0, total: targets.length });
 
@@ -626,61 +691,57 @@ export function BulkOpsPanel() {
         )}
       </Section>
 
-      {/* ── Alternative: publish an existing version ────────────────────── */}
-      <Section title="Or: publish an existing version (independent of the steps below)">
+      {/* ── Alternative: publish what's already in a workspace ──────────── */}
+      <Section title="Or: publish an existing workspace (independent of the steps below)">
         <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-          Loads the versions that already exist in the containers selected above and lets you pick which one to
-          publish per container — for versions already sitting in GTM, not just ones this tool just created.
+          Lists the working areas (workspaces) that currently exist in the containers selected above. Pick which
+          workspace to publish per container — its current contents are turned into a new version, which you then
+          publish. Nothing in the workspace is edited.
         </p>
         <button
-          onClick={loadVersions}
-          disabled={selected.size === 0 || versionsLoading}
+          onClick={loadWorkspaces}
+          disabled={selected.size === 0 || workspacesLoading}
           className="text-sm font-semibold px-5 py-2.5"
           style={{ background: selected.size > 0 ? "var(--accent)" : "var(--surface-elevated)", color: selected.size > 0 ? "#fff" : "var(--text-muted)", borderRadius: R }}
         >
-          {versionsLoading
-            ? `Loading versions... (${versionsProgress?.done ?? 0}/${versionsProgress?.total ?? 0})`
-            : `Load versions for ${selected.size} container(s)`}
+          {workspacesLoading
+            ? `Loading workspaces... (${workspacesProgress?.done ?? 0}/${workspacesProgress?.total ?? 0})`
+            : `Load workspaces for ${selected.size} container(s)`}
         </button>
 
-        {versionsResults.length > 0 && (
+        {workspacesResults.length > 0 && (
           <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
                   <Th>Container</Th>
-                  <Th>Version to publish</Th>
-                  <Th>Currently live</Th>
+                  <Th>Workspace to publish</Th>
                 </tr>
               </thead>
               <tbody>
-                {versionsResults.map((r) => (
+                {workspacesResults.map((r) => (
                   <tr key={r.containerId} style={{ borderBottom: "1px solid var(--border)" }}>
                     <Td>{r.containerName}</Td>
                     <Td>
                       {r.error ? (
                         <span style={{ color: "var(--error)" }}>{r.error}</span>
-                      ) : r.versions.length === 0 ? (
-                        <span style={{ color: "var(--text-muted)" }}>No versions</span>
+                      ) : r.workspaces.length === 0 ? (
+                        <span style={{ color: "var(--text-muted)" }}>No workspaces</span>
                       ) : (
                         <select
-                          value={chosenVersion.get(r.containerId) ?? ""}
-                          onChange={(e) => setChosenVersion((prev) => new Map(prev).set(r.containerId, e.target.value))}
+                          value={chosenWorkspace.get(r.containerId) ?? ""}
+                          onChange={(e) => setChosenWorkspace((prev) => new Map(prev).set(r.containerId, e.target.value))}
                           className="py-1.5 pl-2 pr-6 text-sm outline-none"
                           style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text-primary)", borderRadius: R }}
                         >
-                          {r.versions.map((v) => (
-                            <option key={v.versionId} value={v.versionId}>
-                              {v.name} (#{v.versionId}, {v.numTags ?? 0} tags){v.versionId === r.liveVersionId ? " — LIVE" : ""}
+                          {r.workspaces.map((w) => (
+                            <option key={w.workspaceId} value={w.workspaceId}>
+                              {w.name}
+                              {w.description ? ` — ${w.description}` : ""}
                             </option>
                           ))}
                         </select>
                       )}
-                    </Td>
-                    <Td>
-                      {r.liveVersionId
-                        ? r.versions.find((v) => v.versionId === r.liveVersionId)?.name ?? `#${r.liveVersionId}`
-                        : "—"}
                     </Td>
                   </tr>
                 ))}
@@ -689,21 +750,78 @@ export function BulkOpsPanel() {
           </div>
         )}
 
-        {versionsResults.some((r) => !r.error && r.versions.length > 0) && (
-          <div className="mt-4">
-            {!confirmingVersionPublish ? (
+        {workspacesResults.some((r) => !r.error && r.workspaces.length > 0) && (
+          <div className="mt-4 flex flex-col gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Field label="Version name (optional)">
+                <input
+                  value={workspaceVersionName}
+                  onChange={(e) => setWorkspaceVersionName(e.target.value)}
+                  placeholder={`Bulk publish ${new Date().toISOString().slice(0, 10)}`}
+                  style={inputStyle}
+                />
+              </Field>
+              <Field label="Version notes (optional)">
+                <input value={workspaceVersionNotes} onChange={(e) => setWorkspaceVersionNotes(e.target.value)} style={inputStyle} />
+              </Field>
+            </div>
+
+            <div>
               <button
-                onClick={() => setConfirmingVersionPublish(true)}
-                disabled={versionPublishing}
+                onClick={handleCreateVersions}
+                disabled={creatingVersions}
                 className="text-sm font-semibold px-5 py-2.5"
-                style={{ background: "var(--error)", color: "#fff", borderRadius: R }}
+                style={{ background: "var(--accent)", color: "#fff", borderRadius: R }}
               >
-                Publish chosen versions
+                {creatingVersions
+                  ? `Creating versions... (${createVersionProgress?.done ?? 0}/${createVersionProgress?.total ?? 0})`
+                  : "Create versions from chosen workspaces"}
               </button>
-            ) : (
+            </div>
+
+            {createVersionResults.length > 0 && (
+              <div style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+                      <Th>Container</Th>
+                      <Th>Version</Th>
+                      <Th>Status</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {createVersionResults.map((r) => (
+                      <tr key={r.containerId} style={{ borderBottom: "1px solid var(--border)" }}>
+                        <Td>{r.containerName}</Td>
+                        <Td>{r.versionId ? `${r.versionName ?? ""} (#${r.versionId})` : "—"}</Td>
+                        <Td>
+                          <span style={{ color: r.status === "ok" ? "var(--success)" : "var(--error)", fontWeight: 600 }}>
+                            {r.status === "ok" ? "Created" : r.error ?? "Error"}
+                          </span>
+                        </Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {readyToPublishFromWorkspaces.length > 0 && !confirmingVersionPublish && (
+              <div>
+                <button
+                  onClick={() => setConfirmingVersionPublish(true)}
+                  disabled={versionPublishing}
+                  className="text-sm font-semibold px-5 py-2.5"
+                  style={{ background: "var(--error)", color: "#fff", borderRadius: R }}
+                >
+                  Publish {readyToPublishFromWorkspaces.length} version(s) live
+                </button>
+              </div>
+            )}
+            {readyToPublishFromWorkspaces.length > 0 && confirmingVersionPublish && (
               <div className="flex items-center gap-3">
                 <span className="text-sm" style={{ color: "var(--text-primary)" }}>Publish these versions live now?</span>
-                <button onClick={handlePublishChosenVersions} className="text-sm font-semibold px-4 py-2" style={{ background: "var(--error)", color: "#fff", borderRadius: R }}>
+                <button onClick={handlePublishFromWorkspaces} className="text-sm font-semibold px-4 py-2" style={{ background: "var(--error)", color: "#fff", borderRadius: R }}>
                   Yes, publish
                 </button>
                 <button onClick={() => setConfirmingVersionPublish(false)} className="text-sm px-4 py-2" style={{ background: "var(--surface-elevated)", color: "var(--text-secondary)", borderRadius: R }}>
@@ -712,11 +830,10 @@ export function BulkOpsPanel() {
               </div>
             )}
             {versionPublishing && (
-              <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>
                 Publishing... ({versionPublishProgress?.done ?? 0}/{versionPublishProgress?.total ?? 0})
               </p>
             )}
-            {versionPublishError && <ErrorBox>{versionPublishError}</ErrorBox>}
             {versionPublishResults.length > 0 && (
               <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
                 <table className="w-full text-sm border-collapse">
