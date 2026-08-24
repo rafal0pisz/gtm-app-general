@@ -33,6 +33,15 @@ interface PublishResult {
   error?: string;
 }
 
+interface ContainerVersionsRow {
+  accountId: string;
+  containerId: string;
+  containerName: string;
+  versions: { versionId: string; name: string; numTags?: string; numTriggers?: string; numVariables?: string }[];
+  liveVersionId?: string;
+  error?: string;
+}
+
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
@@ -98,6 +107,17 @@ export function BulkOpsPanel() {
   const [publishProgress, setPublishProgress] = useState<{ done: number; total: number } | null>(null);
   const [publishResults, setPublishResults] = useState<PublishResult[]>([]);
   const [publishError, setPublishError] = useState<string | null>(null);
+
+  // ── Publish an existing version (independent of Apply/Publish above) ────
+  const [versionsResults, setVersionsResults] = useState<ContainerVersionsRow[]>([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versionsProgress, setVersionsProgress] = useState<{ done: number; total: number } | null>(null);
+  const [chosenVersion, setChosenVersion] = useState<Map<string, string>>(new Map());
+  const [confirmingVersionPublish, setConfirmingVersionPublish] = useState(false);
+  const [versionPublishing, setVersionPublishing] = useState(false);
+  const [versionPublishProgress, setVersionPublishProgress] = useState<{ done: number; total: number } | null>(null);
+  const [versionPublishResults, setVersionPublishResults] = useState<PublishResult[]>([]);
+  const [versionPublishError, setVersionPublishError] = useState<string | null>(null);
 
   const fetchContainers = useCallback(async () => {
     setContainersError(null);
@@ -409,6 +429,94 @@ export function BulkOpsPanel() {
     setPublishing(false);
   };
 
+  const loadVersions = async () => {
+    setVersionsResults([]);
+    setChosenVersion(new Map());
+    setVersionPublishResults([]);
+    setVersionsLoading(true);
+
+    const targets = containers
+      .filter((c) => selected.has(c.publicId))
+      .map((c) => ({ accountId: c.accountId, containerId: c.containerId, containerName: c.containerName }));
+
+    setVersionsProgress({ done: 0, total: targets.length });
+    const results: ContainerVersionsRow[] = [];
+    const defaults = new Map<string, string>();
+
+    for (const batch of chunk(targets, CHUNK_SIZE)) {
+      try {
+        const res = await fetch("/api/gtm/bulk/versions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targets: batch }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { results: ContainerVersionsRow[] };
+          results.push(...data.results);
+          for (const r of data.results) {
+            if (r.versions[0]) defaults.set(r.containerId, r.versions[0].versionId);
+          }
+        } else {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          results.push(...batch.map((t) => ({ ...t, versions: [], error: data.error ?? `HTTP ${res.status}` })));
+        }
+      } catch {
+        results.push(...batch.map((t) => ({ ...t, versions: [], error: "Network error." })));
+      }
+      setVersionsResults([...results]);
+      setChosenVersion(new Map(defaults));
+      setVersionsProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
+    }
+
+    setVersionsLoading(false);
+  };
+
+  const handlePublishChosenVersions = async () => {
+    setVersionPublishError(null);
+    setVersionPublishResults([]);
+    setVersionPublishing(true);
+    setConfirmingVersionPublish(false);
+
+    const targets = versionsResults
+      .filter((r) => !r.error && chosenVersion.get(r.containerId))
+      .map((r) => ({
+        accountId: r.accountId,
+        containerId: r.containerId,
+        containerName: r.containerName,
+        versionId: chosenVersion.get(r.containerId)!,
+      }));
+
+    setVersionPublishProgress({ done: 0, total: targets.length });
+
+    for (const batch of chunk(targets, CHUNK_SIZE)) {
+      try {
+        const res = await fetch("/api/gtm/bulk/publish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targets: batch }),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          setVersionPublishResults((prev) => [
+            ...prev,
+            ...batch.map((t) => ({ ...t, status: "error" as const, error: data.error ?? `HTTP ${res.status}` })),
+          ]);
+        } else {
+          const data = (await res.json()) as { results: PublishResult[] };
+          setVersionPublishResults((prev) => [...prev, ...data.results]);
+        }
+      } catch {
+        setVersionPublishResults((prev) => [
+          ...prev,
+          ...batch.map((t) => ({ ...t, status: "error" as const, error: "Network error." })),
+        ]);
+      }
+      setVersionPublishProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
+    }
+
+    setVersionPublishing(false);
+  };
+
   return (
     <div className="flex flex-col gap-8">
       {/* ── Step 1: containers ─────────────────────────────────────────── */}
@@ -515,6 +623,127 @@ export function BulkOpsPanel() {
             </div>
             <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>{selected.size} container(s) selected</p>
           </>
+        )}
+      </Section>
+
+      {/* ── Alternative: publish an existing version ────────────────────── */}
+      <Section title="Or: publish an existing version (independent of the steps below)">
+        <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+          Loads the versions that already exist in the containers selected above and lets you pick which one to
+          publish per container — for versions already sitting in GTM, not just ones this tool just created.
+        </p>
+        <button
+          onClick={loadVersions}
+          disabled={selected.size === 0 || versionsLoading}
+          className="text-sm font-semibold px-5 py-2.5"
+          style={{ background: selected.size > 0 ? "var(--accent)" : "var(--surface-elevated)", color: selected.size > 0 ? "#fff" : "var(--text-muted)", borderRadius: R }}
+        >
+          {versionsLoading
+            ? `Loading versions... (${versionsProgress?.done ?? 0}/${versionsProgress?.total ?? 0})`
+            : `Load versions for ${selected.size} container(s)`}
+        </button>
+
+        {versionsResults.length > 0 && (
+          <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
+            <table className="w-full text-sm border-collapse">
+              <thead>
+                <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+                  <Th>Container</Th>
+                  <Th>Version to publish</Th>
+                  <Th>Currently live</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {versionsResults.map((r) => (
+                  <tr key={r.containerId} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <Td>{r.containerName}</Td>
+                    <Td>
+                      {r.error ? (
+                        <span style={{ color: "var(--error)" }}>{r.error}</span>
+                      ) : r.versions.length === 0 ? (
+                        <span style={{ color: "var(--text-muted)" }}>No versions</span>
+                      ) : (
+                        <select
+                          value={chosenVersion.get(r.containerId) ?? ""}
+                          onChange={(e) => setChosenVersion((prev) => new Map(prev).set(r.containerId, e.target.value))}
+                          className="py-1.5 pl-2 pr-6 text-sm outline-none"
+                          style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text-primary)", borderRadius: R }}
+                        >
+                          {r.versions.map((v) => (
+                            <option key={v.versionId} value={v.versionId}>
+                              {v.name} (#{v.versionId}, {v.numTags ?? 0} tags){v.versionId === r.liveVersionId ? " — LIVE" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </Td>
+                    <Td>
+                      {r.liveVersionId
+                        ? r.versions.find((v) => v.versionId === r.liveVersionId)?.name ?? `#${r.liveVersionId}`
+                        : "—"}
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {versionsResults.some((r) => !r.error && r.versions.length > 0) && (
+          <div className="mt-4">
+            {!confirmingVersionPublish ? (
+              <button
+                onClick={() => setConfirmingVersionPublish(true)}
+                disabled={versionPublishing}
+                className="text-sm font-semibold px-5 py-2.5"
+                style={{ background: "var(--error)", color: "#fff", borderRadius: R }}
+              >
+                Publish chosen versions
+              </button>
+            ) : (
+              <div className="flex items-center gap-3">
+                <span className="text-sm" style={{ color: "var(--text-primary)" }}>Publish these versions live now?</span>
+                <button onClick={handlePublishChosenVersions} className="text-sm font-semibold px-4 py-2" style={{ background: "var(--error)", color: "#fff", borderRadius: R }}>
+                  Yes, publish
+                </button>
+                <button onClick={() => setConfirmingVersionPublish(false)} className="text-sm px-4 py-2" style={{ background: "var(--surface-elevated)", color: "var(--text-secondary)", borderRadius: R }}>
+                  Cancel
+                </button>
+              </div>
+            )}
+            {versionPublishing && (
+              <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
+                Publishing... ({versionPublishProgress?.done ?? 0}/{versionPublishProgress?.total ?? 0})
+              </p>
+            )}
+            {versionPublishError && <ErrorBox>{versionPublishError}</ErrorBox>}
+            {versionPublishResults.length > 0 && (
+              <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+                      <Th>Container</Th>
+                      <Th>Status</Th>
+                      <Th>Error</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {versionPublishResults.map((r) => (
+                      <tr key={r.containerId} style={{ borderBottom: "1px solid var(--border)" }}>
+                        <Td>{r.containerName}</Td>
+                        <Td>
+                          <span style={{ color: r.status === "ok" ? "var(--success)" : "var(--error)", fontWeight: 600 }}>
+                            {r.status === "ok" ? "Published" : "Error"}
+                          </span>
+                        </Td>
+                        <Td>{r.error ?? "—"}</Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         )}
       </Section>
 

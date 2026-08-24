@@ -467,3 +467,73 @@ export async function bulkPublish(
   const tm = tagmanagerClient(accessToken);
   return runInBatches(targets, (target) => publishOne(tm, target));
 }
+
+export interface ContainerVersionSummary {
+  versionId: string;
+  name: string;
+  numTags?: string;
+  numTriggers?: string;
+  numVariables?: string;
+}
+
+export interface ContainerVersionsResult {
+  accountId: string;
+  containerId: string;
+  containerName: string;
+  versions: ContainerVersionSummary[];
+  liveVersionId?: string;
+  error?: string;
+}
+
+async function fetchVersionsForContainer(
+  tm: tagmanager_v2.Tagmanager,
+  target: BulkTarget
+): Promise<ContainerVersionsResult> {
+  try {
+    const parent = `accounts/${target.accountId}/containers/${target.containerId}`;
+
+    const [headersRes, liveVersionId] = await Promise.all([
+      withRetry(() => tm.accounts.containers.version_headers.list({ parent }), "version_headers.list"),
+      withRetry(() => tm.accounts.containers.versions.live({ parent }), "versions.live")
+        .then((res) => res.data.containerVersionId ?? undefined)
+        // A brand-new, never-published container has no live version — that's
+        // not a failure, just nothing to mark as currently live.
+        .catch(() => undefined),
+    ]);
+
+    const versions: ContainerVersionSummary[] = (headersRes.data.containerVersionHeader ?? [])
+      .filter((v) => !v.deleted && v.containerVersionId)
+      .map((v) => ({
+        versionId: v.containerVersionId!,
+        name: v.name || `Version ${v.containerVersionId}`,
+        numTags: v.numTags ?? undefined,
+        numTriggers: v.numTriggers ?? undefined,
+        numVariables: v.numVariables ?? undefined,
+      }))
+      .sort((a, b) => Number(b.versionId) - Number(a.versionId));
+
+    return {
+      accountId: target.accountId,
+      containerId: target.containerId,
+      containerName: target.containerName,
+      versions,
+      liveVersionId,
+    };
+  } catch (err) {
+    return {
+      accountId: target.accountId,
+      containerId: target.containerId,
+      containerName: target.containerName,
+      versions: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function bulkListVersions(
+  accessToken: string,
+  targets: BulkTarget[]
+): Promise<ContainerVersionsResult[]> {
+  const tm = tagmanagerClient(accessToken);
+  return runInBatches(targets, (target) => fetchVersionsForContainer(tm, target));
+}
