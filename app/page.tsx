@@ -1,79 +1,210 @@
 "use client";
 
-import Link from "next/link";
-import { useUser } from "@clerk/nextjs";
-import { Header } from "@/components/Header";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Logo } from "@/components/Logo";
+import { BulkOpsPanel } from "@/components/BulkOpsPanel";
 
-export default function HomePage() {
-  const { user } = useUser();
-  const firstName = user?.firstName?.trim() || "";
-  const greeting = firstName
-    ? `Welcome ${firstName}, I am Michael G., Your Tagging assistant, what do You want to do?`
-    : "Welcome, I am Michael G., Your Tagging assistant, what do You want to do?";
+const R = "4px";
+
+interface GtmStatus {
+  connected: boolean;
+  email?: string;
+}
+
+function HomeContent() {
+  const searchParams = useSearchParams();
+
+  const [status, setStatus] = useState<GtmStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [polling, setPolling] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollCountRef = useRef(0);
+
+  const callbackStatus = searchParams.get("status");
+  const callbackReason = searchParams.get("reason");
+
+  const fetchStatus = useCallback(async (): Promise<GtmStatus | null> => {
+    try {
+      const res = await fetch("/api/gtm/auth/status");
+      if (res.ok) {
+        const data = (await res.json()) as GtmStatus;
+        setStatus(data);
+        return data;
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+    return null;
+  }, []);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setPolling(false);
+    pollCountRef.current = 0;
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- standard fetch-on-mount
+    void fetchStatus();
+    return () => stopPolling();
+  }, [fetchStatus, stopPolling]);
+
+  const startPolling = () => {
+    setPolling(true);
+    pollCountRef.current = 0;
+    pollRef.current = setInterval(async () => {
+      pollCountRef.current += 1;
+      const data = await fetchStatus();
+      if (data?.connected) {
+        stopPolling();
+        return;
+      }
+      if (pollCountRef.current >= 20) stopPolling();
+    }, 3000);
+  };
+
+  const handleConnect = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/gtm/auth/start");
+      const data = (await res.json()) as { url?: string; error?: string };
+      if (!res.ok || !data.url) {
+        setError(data.error ?? "Nie udało się wygenerować URL autoryzacji.");
+        return;
+      }
+      window.open(data.url, "_blank", "noopener,noreferrer");
+      startPolling();
+    } catch {
+      setError("Błąd połączenia. Spróbuj ponownie.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/gtm/auth/disconnect", { method: "DELETE" });
+      if (!res.ok) {
+        const data = (await res.json()) as { error?: string };
+        setError(data.error ?? "Nie udało się rozłączyć konta.");
+        return;
+      }
+      setConfirmDisconnect(false);
+      setStatus({ connected: false });
+    } catch {
+      setError("Błąd połączenia. Spróbuj ponownie.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "var(--background)" }}>
-      <Header />
-
-      <main className="flex-1 flex flex-col items-center justify-center px-4 py-20">
-        <div className="w-full max-w-3xl">
-          <div className="mb-12">
-            <p className="text-sm font-medium mb-4 uppercase tracking-widest" style={{ color: "var(--text-muted)" }}>
-              GTM Manager
-            </p>
-            <h1 className="text-4xl font-bold mb-3" style={{ color: "var(--text-primary)" }}>
-              {greeting}
-            </h1>
+      <header
+        className="flex items-center justify-between px-6 py-4 border-b"
+        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      >
+        <Logo />
+        {status?.connected && (
+          <div className="flex items-center gap-4">
+            {status.email && (
+              <span className="text-sm" style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
+                {status.email}
+              </span>
+            )}
+            {!confirmDisconnect ? (
+              <button
+                onClick={() => setConfirmDisconnect(true)}
+                className="text-xs px-3 py-1.5"
+                style={{ color: "var(--error)", background: "rgba(220,38,38,0.06)", border: "1px solid rgba(220,38,38,0.2)", borderRadius: R }}
+              >
+                Rozłącz
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-xs" style={{ color: "var(--text-secondary)" }}>Na pewno?</span>
+                <button onClick={handleDisconnect} disabled={actionLoading} className="text-xs px-3 py-1.5 font-semibold" style={{ background: "var(--error)", color: "#fff", borderRadius: R, opacity: actionLoading ? 0.5 : 1 }}>
+                  Tak
+                </button>
+                <button onClick={() => setConfirmDisconnect(false)} disabled={actionLoading} className="text-xs px-3 py-1.5" style={{ background: "var(--surface-elevated)", color: "var(--text-secondary)", borderRadius: R }}>
+                  Anuluj
+                </button>
+              </div>
+            )}
           </div>
+        )}
+      </header>
 
-          <div className="grid grid-cols-1 gap-5">
-            <ChatTile />
+      <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-8">
+        {callbackStatus === "error" && (
+          <div className="mb-6 px-4 py-3 text-sm" style={{ background: "rgba(220,38,38,0.06)", border: "1px solid rgba(220,38,38,0.2)", color: "var(--error)", borderRadius: R }}>
+            Błąd autoryzacji Google{callbackReason ? `: ${callbackReason}` : "."}
           </div>
-        </div>
+        )}
+        {callbackStatus === "success" && (
+          <div className="mb-6 px-4 py-3 text-sm" style={{ background: "rgba(22,163,74,0.06)", border: "1px solid rgba(22,163,74,0.2)", color: "var(--success)", borderRadius: R }}>
+            Konto Google połączone.
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center justify-center py-24 gap-3" style={{ color: "var(--text-muted)" }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: "spin 1s linear infinite" }}>
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+            <span className="text-sm">Sprawdzam połączenie...</span>
+          </div>
+        ) : !status?.connected ? (
+          <div className="flex flex-col items-center gap-4 text-center py-24">
+            <div className="w-14 h-14 flex items-center justify-center" style={{ background: "var(--surface-elevated)", color: "var(--text-muted)", borderRadius: R }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-base font-semibold" style={{ color: "var(--text-primary)" }}>Połącz konto Google</p>
+              <p className="text-sm mt-1 max-w-sm" style={{ color: "var(--text-muted)", lineHeight: "1.6" }}>
+                Potrzebne, żeby appka mogła czytać i edytować Twoje kontenery Google Tag Manager.
+              </p>
+            </div>
+            {error && (
+              <div className="px-4 py-3 text-sm" style={{ background: "rgba(220,38,38,0.06)", border: "1px solid rgba(220,38,38,0.2)", color: "var(--error)", borderRadius: R }}>
+                {error}
+              </div>
+            )}
+            <button
+              onClick={handleConnect}
+              disabled={actionLoading || polling}
+              className="text-sm font-bold px-6 py-3"
+              style={{ background: "var(--accent)", color: "#fff", borderRadius: R, opacity: actionLoading || polling ? 0.6 : 1 }}
+            >
+              {polling ? "Czekam na autoryzację..." : "Połącz z Google"}
+            </button>
+          </div>
+        ) : (
+          <BulkOpsPanel />
+        )}
       </main>
     </div>
   );
 }
 
-function ChatTile() {
+export default function HomePage() {
   return (
-    <div
-      className="flex flex-col gap-5 p-6 transition-all duration-200"
-      style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "4px" }}
-      onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
-    >
-      <div
-        className="w-10 h-10 flex items-center justify-center"
-        style={{ background: "var(--accent-subtle)", borderRadius: "4px", color: "var(--accent)" }}
-      >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-        </svg>
-      </div>
-
-      <div className="flex-1">
-        <h2 className="text-base font-semibold mb-2" style={{ color: "var(--text-primary)" }}>
-          Michael G.
-        </h2>
-        <p className="text-sm leading-relaxed" style={{ color: "var(--text-secondary)" }}>
-          Manage Google Tag Manager through chat. Grant access, create tags, and inspect configurations without touching the interface.
-        </p>
-      </div>
-
-      <Link
-        href="/chat"
-        className="inline-flex items-center gap-2 self-start text-sm font-bold px-6 py-3 transition-all duration-200"
-        style={{ background: "var(--accent)", color: "#ffffff", borderRadius: "4px" }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-hover)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "var(--accent)"; }}
-      >
-        Open
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-          <line x1="5" y1="12" x2="19" y2="12" />
-          <polyline points="12 5 19 12 12 19" />
-        </svg>
-      </Link>
-    </div>
+    <Suspense>
+      <HomeContent />
+    </Suspense>
   );
 }

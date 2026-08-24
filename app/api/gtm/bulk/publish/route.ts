@@ -1,6 +1,4 @@
-import { getGtmToken } from "@/lib/secret-manager";
-import { exchangeGtmToken } from "@/lib/gtm-containers";
-import { TENANT_ID } from "@/lib/tenant";
+import { getValidAccessToken } from "@/lib/gtm-session";
 import { bulkPublish, type BulkPublishTarget } from "@/lib/gtm-bulk-ops";
 
 export const maxDuration = 300;
@@ -24,13 +22,12 @@ export async function POST(req: Request) {
       );
     }
 
-    const tokenData = await getGtmToken(TENANT_ID);
-    if (!tokenData) {
-      return Response.json({ error: "GTM is not connected. Connect it in Settings → Authorization." }, { status: 404 });
+    const session = await getValidAccessToken();
+    if (!session) {
+      return Response.json({ error: "GTM is not connected. Connect your Google account first." }, { status: 404 });
     }
-    const accessToken = await exchangeGtmToken(tokenData.refresh_token);
 
-    const results = await bulkPublish(accessToken, targets);
+    const results = await bulkPublish(session.accessToken, targets);
 
     return Response.json({ results });
   } catch (err) {

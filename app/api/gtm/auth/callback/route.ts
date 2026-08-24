@@ -1,7 +1,6 @@
 import { type NextRequest } from "next/server";
 import { consumeOAuthState } from "@/lib/oauth-state";
-import { saveGtmToken } from "@/lib/secret-manager";
-import { TENANT_ID } from "@/lib/tenant";
+import { startSession } from "@/lib/gtm-session";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
@@ -13,16 +12,16 @@ export async function GET(req: NextRequest) {
     process.env.GTM_REDIRECT_URI?.replace("/api/gtm/auth/callback", "") ?? "http://localhost:3000";
 
   if (error) {
-    return Response.redirect(`${redirectBase}/settings?tab=autoryzacja&status=error&reason=${encodeURIComponent(error)}`);
+    return Response.redirect(`${redirectBase}/?status=error&reason=${encodeURIComponent(error)}`);
   }
 
   if (!code || !state) {
-    return Response.redirect(`${redirectBase}/settings?tab=autoryzacja&status=error&reason=missing_params`);
+    return Response.redirect(`${redirectBase}/?status=error&reason=missing_params`);
   }
 
   const valid = consumeOAuthState(state);
   if (!valid) {
-    return Response.redirect(`${redirectBase}/settings?tab=autoryzacja&status=error&reason=invalid_state`);
+    return Response.redirect(`${redirectBase}/?status=error&reason=invalid_state`);
   }
 
   const clientId = process.env.GTM_CLIENT_ID!;
@@ -39,10 +38,10 @@ export async function GET(req: NextRequest) {
     return Response.redirect(`${redirectBase}/settings?tab=autoryzacja&status=error&reason=token_exchange`);
   }
 
-  const tokenData = await tokenRes.json() as { access_token: string; refresh_token?: string };
+  const tokenData = await tokenRes.json() as { access_token: string; refresh_token?: string; expires_in?: number };
 
   if (!tokenData.refresh_token) {
-    return Response.redirect(`${redirectBase}/settings?tab=autoryzacja&status=error&reason=no_refresh_token`);
+    return Response.redirect(`${redirectBase}/?status=error&reason=no_refresh_token`);
   }
 
   let email: string | undefined;
@@ -58,12 +57,12 @@ export async function GET(req: NextRequest) {
     // email optional
   }
 
-  await saveGtmToken(TENANT_ID, {
-    refresh_token: tokenData.refresh_token,
+  await startSession({
     access_token: tokenData.access_token,
+    refresh_token: tokenData.refresh_token,
+    expires_in: tokenData.expires_in ?? 3600,
     email,
-    connected_at: new Date().toISOString(),
   });
 
-  return Response.redirect(`${redirectBase}/settings?tab=autoryzacja&status=success`);
+  return Response.redirect(`${redirectBase}/?status=success`);
 }

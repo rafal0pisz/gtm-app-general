@@ -1,7 +1,4 @@
-import { getGtmToken, getGtmWhitelist, getGtmAccountWhitelist } from "@/lib/secret-manager";
-
 const GTM_BASE = "https://www.googleapis.com/tagmanager/v2";
-const CACHE_TTL_MS = 300_000;
 
 export interface ParsedContainerName {
   domain: string;
@@ -41,50 +38,6 @@ export function parseContainerName(name: string): ParsedContainerName | null {
   if (CC_RE.test(right)) return { domain: left, countryCode: right };
 
   return null;
-}
-
-export type GtmContainerMap = Map<
-  string,
-  {
-    accountId: string;
-    containerId: string;
-    containerName: string;
-    accountName: string;
-    parsed: ParsedContainerName | null;
-  }
->;
-
-interface CacheEntry {
-  containers: GtmContainerInfo[];
-  expiresAt: number;
-}
-
-declare global {
-  // eslint-disable-next-line no-var
-  var __gtmContainersCache: Map<string, CacheEntry> | undefined;
-}
-
-function getCache(): Map<string, CacheEntry> {
-  if (!global.__gtmContainersCache) global.__gtmContainersCache = new Map();
-  return global.__gtmContainersCache;
-}
-
-export async function exchangeGtmToken(refreshToken: string): Promise<string> {
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: process.env.GTM_CLIENT_ID!,
-      client_secret: process.env.GTM_CLIENT_SECRET!,
-      refresh_token: refreshToken,
-      grant_type: "refresh_token",
-    }),
-  });
-  const data = (await res.json()) as { access_token?: string; error?: string };
-  if (!res.ok || !data.access_token) {
-    throw new Error(`GTM token refresh failed: ${data.error ?? "unknown"}`);
-  }
-  return data.access_token;
 }
 
 const BATCH_SIZE = 5;
@@ -139,32 +92,9 @@ export async function fetchGtmAccountList(
   return (data.account ?? []).sort((a, b) => a.name.localeCompare(b.name, "pl"));
 }
 
-async function fetchAllContainers(
-  accessToken: string,
-  accountWhitelist: string[]
-): Promise<GtmContainerInfo[]> {
-  const allAccounts = await fetchGtmAccountList(accessToken);
-
-  let accounts: Array<{ accountId: string; name: string }>;
-  if (accountWhitelist.length > 0) {
-    const wlSet = new Set(accountWhitelist);
-    accounts = allAccounts.filter((a) => wlSet.has(a.accountId));
-    console.log(
-      `[gtm-containers] Account whitelist active: querying ${accounts.length} of ${allAccounts.length} accounts`
-    );
-  } else {
-    accounts = allAccounts;
-    console.log(`[gtm-containers] No account whitelist — querying all ${accounts.length} accounts`);
-  }
-
+export async function fetchAllGtmContainers(accessToken: string): Promise<GtmContainerInfo[]> {
+  const accounts = await fetchGtmAccountList(accessToken);
   if (accounts.length === 0) return [];
-
-  const totalBatches = Math.ceil(accounts.length / BATCH_SIZE);
-  const estimatedSeconds = totalBatches > 1 ? (totalBatches - 1) * (BATCH_DELAY_MS / 1000) : 0;
-  console.log(
-    `[gtm-containers] fetching containers for ${accounts.length} accounts` +
-    ` in batches of ${BATCH_SIZE} (~${totalBatches} batches, ~${estimatedSeconds}s estimated)`
-  );
 
   const allContainers: GtmContainerInfo[] = [];
 
@@ -172,9 +102,6 @@ async function fetchAllContainers(
     if (i > 0) await sleep(BATCH_DELAY_MS);
 
     const batch = accounts.slice(i, i + BATCH_SIZE);
-    const batchIndex = Math.floor(i / BATCH_SIZE) + 1;
-    console.log(`[gtm-containers] batch ${batchIndex}/${totalBatches}: ${batch.map((a) => a.name).join(", ")}`);
-
     const results = await Promise.allSettled(
       batch.map((account) => fetchContainersForAccount(account, accessToken))
     );
@@ -188,70 +115,5 @@ async function fetchAllContainers(
     }
   }
 
-  console.log(`[gtm-containers] done — ${allContainers.length} containers total`);
   return allContainers;
-}
-
-async function loadContainers(tenantId: string, force: boolean): Promise<GtmContainerInfo[] | null> {
-  const cache = getCache();
-  if (!force) {
-    const cached = cache.get(tenantId);
-    if (cached && cached.expiresAt > Date.now()) return cached.containers;
-  } else {
-    cache.delete(tenantId);
-  }
-
-  const tokenData = await getGtmToken(tenantId);
-  if (!tokenData) return null;
-
-  let accessToken: string;
-  try {
-    accessToken = await exchangeGtmToken(tokenData.refresh_token);
-  } catch (err) {
-    console.error("[gtm-containers] token refresh failed:", err);
-    return null;
-  }
-
-  const accountWhitelist = await getGtmAccountWhitelist(tenantId);
-
-  let containers: GtmContainerInfo[];
-  try {
-    containers = await fetchAllContainers(accessToken, accountWhitelist);
-  } catch (err) {
-    console.error("[gtm-containers] fetchAllContainers failed:", err);
-    return null;
-  }
-
-  cache.set(tenantId, { containers, expiresAt: Date.now() + CACHE_TTL_MS });
-  return containers;
-}
-
-export async function fetchAllGtmContainers(tenantId: string, force = false): Promise<GtmContainerInfo[]> {
-  return (await loadContainers(tenantId, force)) ?? [];
-}
-
-export async function fetchWhitelistedGtmContainers(tenantId: string): Promise<GtmContainerInfo[]> {
-  const [containers, whitelist] = await Promise.all([
-    loadContainers(tenantId, false),
-    getGtmWhitelist(tenantId),
-  ]);
-  if (!containers) return [];
-  return whitelist.length === 0
-    ? containers
-    : containers.filter((c) => (whitelist as string[]).includes(c.publicId));
-}
-
-export function buildContainerMap(containers: GtmContainerInfo[]): GtmContainerMap {
-  return new Map(
-    containers.map((c) => [
-      c.publicId,
-      {
-        accountId: c.accountId,
-        containerId: c.containerId,
-        containerName: c.containerName,
-        accountName: c.accountName,
-        parsed: c.parsed,
-      },
-    ])
-  );
 }

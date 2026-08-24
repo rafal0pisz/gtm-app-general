@@ -1,9 +1,8 @@
-import { deleteGtmToken } from "@/lib/secret-manager";
-import { TENANT_ID } from "@/lib/tenant";
+import { clearSession } from "@/lib/gtm-session";
 
 export async function DELETE() {
   try {
-    await deleteGtmToken(TENANT_ID);
+    await clearSession();
     return Response.json({ success: true });
   } catch (err) {
     console.error("GTM disconnect error:", err);

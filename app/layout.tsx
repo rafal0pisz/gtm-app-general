@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Poppins, Fira_Code } from "next/font/google";
-import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 
 const poppins = Poppins({
@@ -19,8 +18,8 @@ const firaCode = Fira_Code({
 });
 
 export const metadata: Metadata = {
-  title: "Sanofi GTM & GA Manager",
-  description: "Zarządzaj Google Analytics 4 i Google Tag Manager przez czat AI",
+  title: "GTM Bulk Publish",
+  description: "Publikuj ten sam tag i pauzuj tagi po nazwie na wielu kontenerach Google Tag Manager naraz.",
 };
 
 export default function RootLayout({
@@ -29,12 +28,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <ClerkProvider>
-      <html lang="pl" className={`${poppins.variable} ${firaCode.variable} h-full`}>
-        <body className="min-h-full flex flex-col antialiased">
-          {children}
-        </body>
-      </html>
-    </ClerkProvider>
+    <html lang="pl" className={`${poppins.variable} ${firaCode.variable} h-full`}>
+      <body className="min-h-full flex flex-col antialiased">
+        {children}
+      </body>
+    </html>
   );
 }

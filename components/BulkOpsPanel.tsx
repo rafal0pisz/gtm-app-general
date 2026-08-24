@@ -75,7 +75,7 @@ export function BulkOpsPanel() {
     setContainersError(null);
     setLoadingContainers(true);
     try {
-      const res = await fetch("/api/gtm/accounts?force=true");
+      const res = await fetch("/api/gtm/accounts");
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
         setContainersError(data.error ?? "Unknown error");

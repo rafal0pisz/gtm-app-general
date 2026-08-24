@@ -1,7 +1,6 @@
-import { getGtmStatus } from "@/lib/secret-manager";
-import { TENANT_ID } from "@/lib/tenant";
+import { getSessionStatus } from "@/lib/gtm-session";
 
 export async function GET() {
-  const status = await getGtmStatus(TENANT_ID);
+  const status = await getSessionStatus();
   return Response.json(status);
 }
