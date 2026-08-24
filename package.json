@@ -1,0 +1,44 @@
+{
+  "name": "sanofi-gtm",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/react": "^4.0.2",
+    "@anthropic-ai/sdk": "^0.106.0",
+    "@clerk/nextjs": "^7.6.3",
+    "@google-cloud/secret-manager": "^6.2.0",
+    "@google-cloud/storage": "^7.21.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ai": "^7.0.2",
+    "google-auth-library": "^10.9.0",
+    "googleapis": "^173.0.0",
+    "next": "16.2.11",
+    "playwright": "^1.62.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.11",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  },
+  "allowScripts": {
+    "protobufjs@7.6.5": true,
+    "sharp@0.34.5": true,
+    "unrs-resolver@1.12.2": true
+  }
+}
