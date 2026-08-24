@@ -44,6 +44,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Jittered so a burst of calls that all hit quota at once don't all retry at
+// the exact same moment and immediately collide again.
+function backoffDelay(attempt: number): number {
+  const base = Math.min(20_000, 2 ** attempt * 1000);
+  return Math.round(base * (0.5 + Math.random()));
+}
+
 // The Tag Manager API's default quota ("Queries per minute per user") is low
 // enough that a handful of containers with several tags each can trip it —
 // every call is against the same quota, regardless of which container it's
@@ -58,7 +65,7 @@ export async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttem
       const message = err instanceof Error ? err.message : String(err);
       const isQuota = /quota exceeded|rate limit exceeded|too many requests/i.test(message);
       if (!isQuota || attempt >= maxAttempts) throw err;
-      const delayMs = Math.min(20_000, 2 ** attempt * 1000);
+      const delayMs = backoffDelay(attempt);
       console.warn(`[gtm] ${label} hit quota (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms`);
       await sleep(delayMs);
     }
@@ -88,7 +95,7 @@ export async function fetchWithRetry(
     }
     if (!isQuota) return res;
 
-    const delayMs = Math.min(20_000, 2 ** attempt * 1000);
+    const delayMs = backoffDelay(attempt);
     console.warn(`[gtm] ${label} hit quota (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms`);
     await sleep(delayMs);
   }

@@ -2,6 +2,10 @@ import { getValidAccessToken } from "@/lib/gtm-session";
 import { fetchAllGtmContainers, type FailedAccount } from "@/lib/gtm-containers";
 
 export const dynamic = "force-dynamic";
+// Scanning 100+ GTM accounts can take a while — without this the route was
+// silently killed by Vercel's default function timeout partway through,
+// which looked exactly like "it just never loads."
+export const maxDuration = 300;
 
 export interface GtmContainer {
   accountId: string;

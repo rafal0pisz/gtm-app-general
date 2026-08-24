@@ -48,8 +48,12 @@ export function parseContainerName(name: string): ParsedContainerName | null {
   return null;
 }
 
-const BATCH_SIZE = 3;
-const BATCH_DELAY_MS = 2_000;
+// Read-only listing calls are cheap individually, and quota errors now
+// retry with backoff on their own — so scan fairly aggressively by default
+// and let the retry logic absorb whatever quota hits that causes, rather
+// than always paying a large fixed delay whether or not it was needed.
+const BATCH_SIZE = 10;
+const BATCH_DELAY_MS = 300;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
