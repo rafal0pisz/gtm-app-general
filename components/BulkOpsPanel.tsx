@@ -1,13 +1,17 @@
 "use client";
 
 import { useState, useMemo, useCallback } from "react";
-import type { GtmContainer } from "@/app/api/gtm/accounts/route";
+import type { GtmContainer } from "@/app/api/gtm/accounts/containers/route";
 
 const R = "4px";
 // Kept small: each container can take a while now that write calls retry
 // with backoff on GTM API quota errors, so a big chunk risks the Vercel
 // function timing out before it finishes.
 const CHUNK_SIZE = 4;
+// How many accounts' containers to fetch per /api/gtm/accounts/containers
+// call — small enough that one call always finishes quickly regardless of
+// hosting time limits, however many accounts there are in total.
+const ACCOUNT_CHUNK_SIZE = 15;
 
 interface ApplyResult {
   accountId: string;
@@ -62,6 +66,7 @@ export function BulkOpsPanel() {
   const [failedAccounts, setFailedAccounts] = useState<{ accountId: string; name: string; error: string }[]>([]);
   const [notFoundIds, setNotFoundIds] = useState<string[]>([]);
   const [targetIdsRaw, setTargetIdsRaw] = useState("");
+  const [accountScanProgress, setAccountScanProgress] = useState<{ done: number; total: number } | null>(null);
   const [search, setSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -97,26 +102,72 @@ export function BulkOpsPanel() {
     setContainersError(null);
     setFailedAccounts([]);
     setNotFoundIds([]);
+    setContainers([]);
     setLoadingContainers(true);
+    setAccountScanProgress(null);
+
     try {
-      const ids = targetIdsRaw.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
-      const url = ids.length > 0 ? `/api/gtm/accounts?ids=${encodeURIComponent(ids.join(","))}` : "/api/gtm/accounts";
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
+      const targetIds = new Set(
+        targetIdsRaw.split(/[\n,]/).map((s) => s.trim().toUpperCase()).filter(Boolean)
+      );
+      const isTargeted = targetIds.size > 0;
+
+      const accountsRes = await fetch("/api/gtm/accounts", { cache: "no-store" });
+      if (!accountsRes.ok) {
+        const data = (await accountsRes.json()) as { error?: string };
         setContainersError(data.error ?? "Unknown error");
         return;
       }
-      const data = (await res.json()) as {
-        containers: GtmContainer[];
-        failedAccounts?: { accountId: string; name: string; error: string }[];
-        notFoundIds?: string[];
+      const { accounts: allAccounts } = (await accountsRes.json()) as {
+        accounts: { accountId: string; name: string }[];
       };
-      setContainers(data.containers);
-      setFailedAccounts(data.failedAccounts ?? []);
-      setNotFoundIds(data.notFoundIds ?? []);
-      // Targeted lookup (specific IDs pasted in) implies "I want these" — pre-select them all.
-      if (ids.length > 0) setSelected(new Set(data.containers.map((c) => c.publicId)));
+
+      setAccountScanProgress({ done: 0, total: allAccounts.length });
+
+      const foundContainers: GtmContainer[] = [];
+      const allFailedAccounts: { accountId: string; name: string; error: string }[] = [];
+      const remaining = new Set(targetIds);
+      const batches = chunk(allAccounts, ACCOUNT_CHUNK_SIZE);
+
+      for (const batch of batches) {
+        if (isTargeted && remaining.size === 0) break;
+
+        try {
+          const res = await fetch("/api/gtm/accounts/containers", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ accounts: batch }),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as {
+              containers: GtmContainer[];
+              failedAccounts?: { accountId: string; name: string; error: string }[];
+            };
+            for (const c of data.containers) {
+              if (!isTargeted || remaining.has(c.publicId)) {
+                foundContainers.push(c);
+                remaining.delete(c.publicId);
+              }
+            }
+            if (data.failedAccounts) allFailedAccounts.push(...data.failedAccounts);
+          } else {
+            const data = (await res.json().catch(() => ({}))) as { error?: string };
+            allFailedAccounts.push(
+              ...batch.map((a) => ({ accountId: a.accountId, name: a.name, error: data.error ?? `HTTP ${res.status}` }))
+            );
+          }
+        } catch {
+          allFailedAccounts.push(...batch.map((a) => ({ accountId: a.accountId, name: a.name, error: "Network error." })));
+        }
+
+        // Update incrementally so the list/progress is visibly moving, not a frozen spinner.
+        setContainers([...foundContainers]);
+        setFailedAccounts([...allFailedAccounts]);
+        setAccountScanProgress((prev) => (prev ? { done: prev.done + batch.length, total: prev.total } : prev));
+      }
+
+      setNotFoundIds(isTargeted ? [...remaining] : []);
+      if (isTargeted) setSelected(new Set(foundContainers.map((c) => c.publicId)));
       setLoaded(true);
     } catch {
       setContainersError("Failed to load the container list.");
@@ -376,7 +427,11 @@ export function BulkOpsPanel() {
             className="text-sm px-3 py-2"
             style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text-secondary)", borderRadius: R, opacity: loadingContainers ? 0.5 : 1 }}
           >
-            {loadingContainers ? "Loading..." : loaded ? "Refresh" : "Load containers"}
+            {loadingContainers
+              ? `Scanning... ${accountScanProgress?.done ?? 0}/${accountScanProgress?.total ?? 0} accounts, ${containers.length} found`
+              : loaded
+              ? "Refresh"
+              : "Load containers"}
           </button>
         </div>
 
@@ -399,7 +454,7 @@ export function BulkOpsPanel() {
           </div>
         )}
 
-        {loaded && !containersError && (
+        {(loaded || (loadingContainers && containers.length > 0)) && !containersError && (
           <>
             <div style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden", maxHeight: 360, overflowY: "auto" }}>
               <table className="w-full text-sm border-collapse">

@@ -1,23 +1,13 @@
 import { getValidAccessToken } from "@/lib/gtm-session";
-import { fetchAllGtmContainers, type FailedAccount } from "@/lib/gtm-containers";
+import { fetchGtmAccountList } from "@/lib/gtm-containers";
 
 export const dynamic = "force-dynamic";
-// Scanning 100+ GTM accounts can take a while — without this the route was
-// silently killed by Vercel's default function timeout partway through,
-// which looked exactly like "it just never loads."
-export const maxDuration = 300;
 
-export interface GtmContainer {
-  accountId: string;
-  accountName: string;
-  containerId: string;
-  containerName: string;
-  publicId: string;
-  usageContext: string[];
-  parsed: { domain: string; countryCode: string } | null;
-}
-
-export async function GET(req: Request) {
+// Just the account list — fast (one or two paginated calls), regardless of
+// how many accounts there are. Fetching containers per account is a
+// separate, chunked step (see /api/gtm/accounts/containers) so that step
+// can't blow past a function time limit no matter how many accounts exist.
+export async function GET() {
   try {
     const session = await getValidAccessToken();
     if (!session) {
@@ -27,36 +17,8 @@ export async function GET(req: Request) {
       );
     }
 
-    const idsParam = new URL(req.url).searchParams.get("ids");
-    const targetPublicIds = idsParam
-      ? new Set(idsParam.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean))
-      : undefined;
-
-    const { containers, failedAccounts, notFoundIds } = await fetchAllGtmContainers(
-      session.accessToken,
-      targetPublicIds
-    );
-    const result: GtmContainer[] = containers
-      .map((c) => ({
-        accountId: c.accountId,
-        accountName: c.accountName,
-        containerId: c.containerId,
-        containerName: c.containerName,
-        publicId: c.publicId,
-        usageContext: c.usageContext,
-        parsed: c.parsed,
-      }))
-      .sort((a, b) => a.containerName.localeCompare(b.containerName, "pl"));
-
-    const response: {
-      containers: GtmContainer[];
-      failedAccounts?: FailedAccount[];
-      notFoundIds?: string[];
-    } = { containers: result };
-    if (failedAccounts.length > 0) response.failedAccounts = failedAccounts;
-    if (notFoundIds && notFoundIds.length > 0) response.notFoundIds = notFoundIds;
-
-    return Response.json(response);
+    const accounts = await fetchGtmAccountList(session.accessToken);
+    return Response.json({ accounts });
   } catch (err) {
     console.error("[gtm/accounts] unhandled error:", err);
     return Response.json({ error: "Wewnętrzny błąd serwera." }, { status: 500 });

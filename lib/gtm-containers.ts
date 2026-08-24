@@ -23,6 +23,11 @@ export interface FailedAccount {
   error: string;
 }
 
+export interface GtmAccountInfo {
+  accountId: string;
+  name: string;
+}
+
 // Expected formats:
 //   {DOMAIN} - {CC}          e.g. "sanofi.com - PL"
 //   {CC} - {DOMAIN}          e.g. "PL - sanofi.com"
@@ -68,7 +73,7 @@ async function readErrorMessage(res: Response): Promise<string> {
 // retries are exhausted is visible to the caller instead of quietly leaving
 // this account's container list incomplete.
 async function fetchContainersForAccount(
-  account: { accountId: string; name: string },
+  account: GtmAccountInfo,
   accessToken: string
 ): Promise<GtmContainerInfo[]> {
   const all: GtmContainerInfo[] = [];
@@ -103,10 +108,8 @@ async function fetchContainersForAccount(
   return all;
 }
 
-export async function fetchGtmAccountList(
-  accessToken: string
-): Promise<Array<{ accountId: string; name: string }>> {
-  const all: Array<{ accountId: string; name: string }> = [];
+export async function fetchGtmAccountList(accessToken: string): Promise<GtmAccountInfo[]> {
+  const all: GtmAccountInfo[] = [];
   let pageToken: string | undefined;
 
   do {
@@ -128,35 +131,24 @@ export async function fetchGtmAccountList(
   return all.sort((a, b) => a.name.localeCompare(b.name, "pl"));
 }
 
-export interface FetchAllContainersResult {
+export interface FetchContainersResult {
   containers: GtmContainerInfo[];
   failedAccounts: FailedAccount[];
-  // Only set when targetPublicIds was given: any of those IDs never found in
-  // any scanned account (typo, wrong account, no access — surfaced instead
-  // of silently coming up short).
-  notFoundIds?: string[];
 }
 
-// When targetPublicIds is given, accounts are still scanned one batch at a
-// time (there's no way to look up a container by public ID without knowing
-// its account), but scanning stops as soon as every requested ID has been
-// found — for someone who already knows which ~50 of 100+ accounts they
-// need, this is usually much faster than the unfiltered full crawl.
-export async function fetchAllGtmContainers(
+// Fetches containers for a caller-supplied slice of accounts only — the
+// caller (an API route handling one request per small chunk of accounts)
+// decides how big that slice is, which keeps any single HTTP round-trip
+// short and safely inside any hosting platform's function time limit,
+// however many accounts there are in total across repeated calls.
+export async function fetchContainersForAccounts(
   accessToken: string,
-  targetPublicIds?: Set<string>
-): Promise<FetchAllContainersResult> {
-  const accounts = await fetchGtmAccountList(accessToken);
-  if (accounts.length === 0) {
-    return { containers: [], failedAccounts: [], notFoundIds: targetPublicIds ? [...targetPublicIds] : undefined };
-  }
-
-  const allContainers: GtmContainerInfo[] = [];
+  accounts: GtmAccountInfo[]
+): Promise<FetchContainersResult> {
+  const containers: GtmContainerInfo[] = [];
   const failedAccounts: FailedAccount[] = [];
-  const remaining = targetPublicIds ? new Set(targetPublicIds) : null;
 
   for (let i = 0; i < accounts.length; i += BATCH_SIZE) {
-    if (remaining && remaining.size === 0) break;
     if (i > 0) await sleep(BATCH_DELAY_MS);
 
     const batch = accounts.slice(i, i + BATCH_SIZE);
@@ -166,12 +158,7 @@ export async function fetchAllGtmContainers(
 
     results.forEach((r, idx) => {
       if (r.status === "fulfilled") {
-        for (const c of r.value) {
-          if (!remaining || remaining.has(c.publicId)) {
-            allContainers.push(c);
-            remaining?.delete(c.publicId);
-          }
-        }
+        containers.push(...r.value);
       } else {
         const account = batch[idx];
         const error = r.reason instanceof Error ? r.reason.message : String(r.reason);
@@ -181,5 +168,5 @@ export async function fetchAllGtmContainers(
     });
   }
 
-  return { containers: allContainers, failedAccounts, notFoundIds: remaining ? [...remaining] : undefined };
+  return { containers, failedAccounts };
 }
