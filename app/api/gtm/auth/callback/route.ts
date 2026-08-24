@@ -2,6 +2,8 @@ import { type NextRequest } from "next/server";
 import { consumeOAuthState } from "@/lib/oauth-state";
 import { startSession } from "@/lib/gtm-session";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const code = searchParams.get("code");

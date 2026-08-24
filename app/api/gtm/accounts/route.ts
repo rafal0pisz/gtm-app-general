@@ -1,6 +1,8 @@
 import { getValidAccessToken } from "@/lib/gtm-session";
 import { fetchAllGtmContainers } from "@/lib/gtm-containers";
 
+export const dynamic = "force-dynamic";
+
 export interface GtmContainer {
   accountId: string;
   accountName: string;

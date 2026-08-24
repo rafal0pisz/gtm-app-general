@@ -1,5 +1,11 @@
 import { createOAuthState } from "@/lib/oauth-state";
 
+// This route sets a fresh CSRF-state cookie on every call — it must never be
+// served from a browser/CDN cache, or a stale cached state value would be
+// sent to Google while a *different* (freshly overwritten) cookie sits on
+// the client, causing "invalid_state" on the callback.
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const clientId = process.env.GTM_CLIENT_ID;
   const redirectUri = process.env.GTM_REDIRECT_URI ?? "http://localhost:3000/api/gtm/auth/callback";
@@ -29,5 +35,5 @@ export async function GET() {
   });
 
   const url = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
-  return Response.json({ url });
+  return Response.json({ url }, { headers: { "Cache-Control": "no-store" } });
 }

@@ -1,5 +1,7 @@
 import { clearSession } from "@/lib/gtm-session";
 
+export const dynamic = "force-dynamic";
+
 export async function DELETE() {
   try {
     await clearSession();

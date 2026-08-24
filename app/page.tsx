@@ -29,7 +29,7 @@ function HomeContent() {
 
   const fetchStatus = useCallback(async (): Promise<GtmStatus | null> => {
     try {
-      const res = await fetch("/api/gtm/auth/status");
+      const res = await fetch("/api/gtm/auth/status", { cache: "no-store" });
       if (res.ok) {
         const data = (await res.json()) as GtmStatus;
         setStatus(data);
@@ -76,7 +76,7 @@ function HomeContent() {
     setActionLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/gtm/auth/start");
+      const res = await fetch("/api/gtm/auth/start", { cache: "no-store" });
       const data = (await res.json()) as { url?: string; error?: string };
       if (!res.ok || !data.url) {
         setError(data.error ?? "Nie udało się wygenerować URL autoryzacji.");

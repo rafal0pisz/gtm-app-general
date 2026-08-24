@@ -32,6 +32,24 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+// Accepts: a single tag object, a bare array of tag objects, or a GTM
+// "Export Container" style wrapper ({ tag: [...] } or
+// { containerVersion: { tag: [...] } }) — pulls out the array of tag objects
+// either way.
+function extractTagObjects(parsed: unknown): Record<string, unknown>[] {
+  if (Array.isArray(parsed)) return parsed as Record<string, unknown>[];
+  if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.tag)) return obj.tag as Record<string, unknown>[];
+    const cv = obj.containerVersion;
+    if (cv && typeof cv === "object" && Array.isArray((cv as Record<string, unknown>).tag)) {
+      return (cv as Record<string, unknown>).tag as Record<string, unknown>[];
+    }
+    if (typeof obj.name === "string") return [obj];
+  }
+  return [];
+}
+
 export function BulkOpsPanel() {
   // ── Container picker ────────────────────────────────────────────────────
   const [containers, setContainers] = useState<GtmContainer[]>([]);
@@ -150,7 +168,7 @@ export function BulkOpsPanel() {
       ? pauseNamesRaw.split(/[\n,]/).map((s) => s.trim()).filter(Boolean)
       : [];
 
-    let publishTag: Record<string, unknown> | undefined;
+    let publishTags: Record<string, unknown>[] | undefined;
     if (publishEnabled) {
       let parsed: unknown;
       try {
@@ -159,11 +177,23 @@ export function BulkOpsPanel() {
         setApplyError("Tag JSON jest niepoprawny — nie da się go sparsować.");
         return;
       }
-      if (typeof parsed !== "object" || parsed === null || typeof (parsed as { name?: unknown }).name !== "string") {
-        setApplyError('Tag JSON musi być obiektem z co najmniej polem "name" (string).');
+      const tagObjects = extractTagObjects(parsed);
+      if (tagObjects.length === 0) {
+        setApplyError(
+          'Nie znaleziono żadnego tagu w JSON-ie. Wklej pojedynczy obiekt tagu, tablicę tagów, albo eksport kontenera z polem "tag".'
+        );
         return;
       }
-      publishTag = { ...(parsed as Record<string, unknown>), firingTriggerName: firingTriggerName.trim() || undefined };
+      const withoutName = tagObjects.findIndex((t) => typeof t.name !== "string");
+      if (withoutName !== -1) {
+        setApplyError(`Tag pod indeksem ${withoutName} nie ma pola "name" (string).`);
+        return;
+      }
+      const defaultTrigger = firingTriggerName.trim() || undefined;
+      publishTags = tagObjects.map((t) => ({
+        ...t,
+        firingTriggerName: typeof t.firingTriggerName === "string" ? t.firingTriggerName : defaultTrigger,
+      }));
     }
 
     setApplying(true);
@@ -180,7 +210,7 @@ export function BulkOpsPanel() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             targets: batch,
-            publishTag,
+            publishTags,
             pauseTagNames,
             versionName: finalVersionName,
             versionNotes: versionNotes.trim() || undefined,
@@ -366,24 +396,31 @@ export function BulkOpsPanel() {
       <Section title="2. What to do in each selected container">
         <label className="flex items-center gap-2 mb-3 cursor-pointer">
           <input type="checkbox" checked={publishEnabled} onChange={(e) => setPublishEnabled(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
-          <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>Create or update a tag</span>
+          <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>Create or update tags</span>
         </label>
         {publishEnabled && (
           <div className="flex flex-col gap-3 mb-6 pl-6">
-            <Field label='Tag JSON (must include at least "name" and "type" — the exact GTM Tag object you already have prepared)'>
+            <Field label='Tag JSON — a single tag object, an array of tags, or a GTM "Export Container" JSON (its "tag" array is used automatically)'>
               <textarea
                 value={tagJsonText}
                 onChange={(e) => setTagJsonText(e.target.value)}
-                rows={12}
+                rows={14}
                 placeholder={JSON.stringify(
-                  {
-                    name: "Custom Script - Consent Banner",
-                    type: "html",
-                    parameter: [
-                      { type: "template", key: "html", value: "<script>...</script>" },
-                      { type: "boolean", key: "supportDocumentWrite", value: "false" },
-                    ],
-                  },
+                  [
+                    {
+                      name: "Custom Script - Consent Banner",
+                      type: "html",
+                      parameter: [
+                        { type: "template", key: "html", value: "<script>...</script>" },
+                        { type: "boolean", key: "supportDocumentWrite", value: "false" },
+                      ],
+                    },
+                    {
+                      name: "GA4 - Purchase Event",
+                      type: "gaawe",
+                      parameter: [{ type: "template", key: "eventName", value: "purchase" }],
+                    },
+                  ],
                   null,
                   2
                 )}
@@ -391,10 +428,11 @@ export function BulkOpsPanel() {
               />
             </Field>
             <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Matched to an existing tag by <code>name</code> (case-insensitive) → updated; otherwise created new.
-              Don&apos;t include <code>firingTriggerId</code> — trigger IDs aren&apos;t portable across containers, use the field below instead.
+              Each tag is matched to an existing one by <code>name</code> (case-insensitive) → updated; otherwise created new.
+              Don&apos;t include <code>firingTriggerId</code> — trigger IDs aren&apos;t portable across containers. Add a per-tag
+              <code> firingTriggerName</code> field to override the default below, e.g. only for tags that don&apos;t exist yet.
             </p>
-            <Field label="Firing trigger name (only used when the tag doesn't exist yet — resolved per container)">
+            <Field label="Default firing trigger name (used for any tag above without its own firingTriggerName, only when that tag doesn't exist yet)">
               <input value={firingTriggerName} onChange={(e) => setFiringTriggerName(e.target.value)} placeholder="All Pages" style={inputStyle} />
             </Field>
           </div>

@@ -20,7 +20,7 @@ export interface BulkTagSpec {
 }
 
 export interface BulkApplyOptions {
-  publishTag?: BulkTagSpec;
+  publishTags?: BulkTagSpec[];
   pauseTagNames?: string[];
   versionName: string;
   versionNotes?: string;
@@ -97,17 +97,16 @@ async function upsertPublishTag(
   tm: tagmanager_v2.Tagmanager,
   parent: string,
   spec: BulkTagSpec,
-  existingTags: tagmanager_v2.Schema$Tag[],
+  knownByName: Map<string, tagmanager_v2.Schema$Tag>,
   changes: string[]
-): Promise<void> {
+): Promise<tagmanager_v2.Schema$Tag> {
   const { firingTriggerName, ...tagFields } = spec;
   const firingTriggerId = firingTriggerName
     ? [await findTriggerIdByName(tm, parent, firingTriggerName)]
     : undefined;
 
-  const existing = existingTags.find(
-    (t) => t.name?.trim().toLowerCase() === spec.name.trim().toLowerCase()
-  );
+  const key = spec.name.trim().toLowerCase();
+  const existing = knownByName.get(key);
 
   if (existing?.tagId) {
     const full = (await tm.accounts.containers.workspaces.tags.get({
@@ -118,17 +117,19 @@ async function upsertPublishTag(
       ...tagFields,
       ...(firingTriggerId ? { firingTriggerId } : {}),
     };
-    await tm.accounts.containers.workspaces.tags.update({
+    const updated = (await tm.accounts.containers.workspaces.tags.update({
       path: `${parent}/tags/${existing.tagId}`,
       requestBody: merged,
-    });
+    })).data;
     changes.push(`Tag "${spec.name}" updated (tagId ${existing.tagId})`);
+    return updated;
   } else {
     const created = (await tm.accounts.containers.workspaces.tags.create({
       parent,
       requestBody: { ...tagFields, ...(firingTriggerId ? { firingTriggerId } : {}) },
     })).data;
     changes.push(`Tag "${spec.name}" created (tagId ${created.tagId})`);
+    return created;
   }
 }
 
@@ -174,13 +175,19 @@ async function applyToContainer(
     const workspaceId = await resolveWorkspaceId(tm, target.accountId, target.containerId);
     const parent = workspacePath(target.accountId, target.containerId, workspaceId);
 
-    const needsTagList = !!options.publishTag || (options.pauseTagNames?.length ?? 0) > 0;
+    const needsTagList = (options.publishTags?.length ?? 0) > 0 || (options.pauseTagNames?.length ?? 0) > 0;
     const existingTags = needsTagList
       ? (await tm.accounts.containers.workspaces.tags.list({ parent })).data.tag ?? []
       : [];
 
-    if (options.publishTag) {
-      await upsertPublishTag(tm, parent, options.publishTag, existingTags, changes);
+    if (options.publishTags?.length) {
+      const knownByName = new Map(
+        existingTags.filter((t) => t.name).map((t) => [t.name!.trim().toLowerCase(), t])
+      );
+      for (const tagSpec of options.publishTags) {
+        const result = await upsertPublishTag(tm, parent, tagSpec, knownByName, changes);
+        knownByName.set(tagSpec.name.trim().toLowerCase(), result);
+      }
     }
     if (options.pauseTagNames?.length) {
       await pauseTagsByName(tm, parent, options.pauseTagNames, existingTags, changes);

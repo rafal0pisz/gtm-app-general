@@ -5,7 +5,7 @@ export const maxDuration = 300;
 
 interface ApplyBody {
   targets?: BulkTarget[];
-  publishTag?: BulkTagSpec;
+  publishTags?: BulkTagSpec[];
   pauseTagNames?: string[];
   versionName?: string;
   versionNotes?: string;
@@ -25,9 +25,9 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    if (!body.publishTag && !(body.pauseTagNames && body.pauseTagNames.length > 0)) {
+    if (!(body.publishTags && body.publishTags.length > 0) && !(body.pauseTagNames && body.pauseTagNames.length > 0)) {
       return Response.json(
-        { error: "Provide at least a publishTag or a non-empty pauseTagNames list." },
+        { error: "Provide at least one publishTags entry or a non-empty pauseTagNames list." },
         { status: 400 }
       );
     }
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
     }
 
     const results = await bulkApply(session.accessToken, targets, {
-      publishTag: body.publishTag,
+      publishTags: body.publishTags,
       pauseTagNames: body.pauseTagNames,
       versionName: body.versionName || `Bulk update ${new Date().toISOString()}`,
       versionNotes: body.versionNotes,
