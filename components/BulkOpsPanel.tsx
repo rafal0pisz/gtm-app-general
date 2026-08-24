@@ -75,6 +75,7 @@ export function BulkOpsPanel() {
   const [publishEnabled, setPublishEnabled] = useState(true);
   const [tagJsonText, setTagJsonText] = useState("");
   const [firingTriggerName, setFiringTriggerName] = useState("All Pages");
+  const [sourceContainerId, setSourceContainerId] = useState("");
 
   // ── Pause-tags form ─────────────────────────────────────────────────────
   const [pauseEnabled, setPauseEnabled] = useState(false);
@@ -265,6 +266,28 @@ export function BulkOpsPanel() {
       }));
     }
 
+    let sourceContainer: { accountId: string; containerId: string } | undefined;
+    const needsCustomTemplate = publishTags?.some(
+      (t) => typeof t.type === "string" && t.type.startsWith("cvt_")
+    );
+    if (needsCustomTemplate) {
+      const trimmedSourceId = sourceContainerId.trim().toUpperCase();
+      if (!trimmedSourceId) {
+        setApplyError(
+          'One or more tags use a custom-template type ("cvt_...") — fill in "Source container for custom templates" below.'
+        );
+        return;
+      }
+      const found = containers.find((c) => c.publicId.toUpperCase() === trimmedSourceId);
+      if (!found) {
+        setApplyError(
+          `Source container ${trimmedSourceId} isn't in the loaded list above — add it to the "Container public IDs" box in step 1 and reload.`
+        );
+        return;
+      }
+      sourceContainer = { accountId: found.accountId, containerId: found.containerId };
+    }
+
     setApplying(true);
 
     const finalVersionName = versionName.trim() || `Bulk update ${new Date().toISOString()}`;
@@ -283,6 +306,7 @@ export function BulkOpsPanel() {
             pauseTagNames,
             versionName: finalVersionName,
             versionNotes: versionNotes.trim() || undefined,
+            sourceContainer,
           }),
         });
         if (!res.ok) {
@@ -536,6 +560,9 @@ export function BulkOpsPanel() {
             </p>
             <Field label="Default firing trigger name (used for any tag above without its own firingTriggerName, only when that tag doesn't exist yet)">
               <input value={firingTriggerName} onChange={(e) => setFiringTriggerName(e.target.value)} placeholder="All Pages" style={inputStyle} />
+            </Field>
+            <Field label='Source container for custom templates (only needed if a tag type starts with "cvt_") — GTM-XXXXXXX. Must be a container already loaded in the list above.'>
+              <input value={sourceContainerId} onChange={(e) => setSourceContainerId(e.target.value)} placeholder="GTM-5DP3WTLJ" style={{ ...inputStyle, fontFamily: "var(--font-mono)" }} />
             </Field>
           </div>
         )}

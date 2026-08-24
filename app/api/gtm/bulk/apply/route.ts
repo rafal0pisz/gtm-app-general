@@ -1,5 +1,5 @@
 import { getValidAccessToken } from "@/lib/gtm-session";
-import { bulkApply, type BulkTarget, type BulkTagSpec } from "@/lib/gtm-bulk-ops";
+import { bulkApply, type BulkTarget, type BulkTagSpec, type SourceContainer } from "@/lib/gtm-bulk-ops";
 
 export const maxDuration = 300;
 
@@ -9,6 +9,7 @@ interface ApplyBody {
   pauseTagNames?: string[];
   versionName?: string;
   versionNotes?: string;
+  sourceContainer?: SourceContainer;
 }
 
 export async function POST(req: Request) {
@@ -42,6 +43,7 @@ export async function POST(req: Request) {
       pauseTagNames: body.pauseTagNames,
       versionName: body.versionName || `Bulk update ${new Date().toISOString()}`,
       versionNotes: body.versionNotes,
+      sourceContainer: body.sourceContainer,
     });
 
     return Response.json({ results });

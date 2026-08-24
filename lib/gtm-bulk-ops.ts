@@ -7,6 +7,11 @@ export interface BulkTarget {
   containerName: string;
 }
 
+export interface SourceContainer {
+  accountId: string;
+  containerId: string;
+}
+
 export interface BulkTagSpec {
   // Arbitrary GTM Tag fields (name, type, parameter, notes, priority,
   // consentSettings, ...) — pasted in as-is by the user, sent through to the
@@ -24,6 +29,12 @@ export interface BulkApplyOptions {
   pauseTagNames?: string[];
   versionName: string;
   versionNotes?: string;
+  // When a tag's type is a custom-template reference ("cvt_<templateId>"),
+  // that template must already exist in the *target* container — the ID is
+  // local to whichever container defines it. If given, the referenced
+  // template is copied from this container into each target container
+  // (matched/reused if already present there) before the tag is created.
+  sourceContainer?: SourceContainer;
 }
 
 export interface BulkApplyResult {
@@ -107,6 +118,93 @@ class TriggerResolver {
   }
 }
 
+// Two custom templates are "the same" if they came from the same Community
+// Gallery entry, or — for a hand-built (non-gallery) template — if they
+// have the exact same display name. Good enough to avoid re-importing (and
+// duplicating) a template that's already present in the target container.
+function sameTemplate(
+  a: tagmanager_v2.Schema$CustomTemplate,
+  b: tagmanager_v2.Schema$CustomTemplate
+): boolean {
+  if (a.galleryReference && b.galleryReference) {
+    return (
+      a.galleryReference.host === b.galleryReference.host &&
+      a.galleryReference.owner === b.galleryReference.owner &&
+      a.galleryReference.repository === b.galleryReference.repository
+    );
+  }
+  return !!a.name && a.name === b.name;
+}
+
+// Resolves a tag `type` like "cvt_62480338_7" (a Custom Template Gallery
+// reference) to whatever type string is valid *in the target container* —
+// the numeric ID is local to whichever container owns that template
+// instance, so the same literal type string from a pasted tag JSON is only
+// ever correct in the one container it was copied from. Imports the
+// template into the target container (or reuses a matching one already
+// there) exactly once per container, regardless of how many tags reference
+// it.
+class CustomTemplateResolver {
+  private sourceTemplates: tagmanager_v2.Schema$CustomTemplate[] | null = null;
+  private targetTemplates: tagmanager_v2.Schema$CustomTemplate[] | null = null;
+  private cache = new Map<string, string>();
+
+  constructor(
+    private tm: tagmanager_v2.Tagmanager,
+    private sourceParent: string,
+    private targetParent: string
+  ) {}
+
+  async resolve(sourceType: string): Promise<string> {
+    const match = /^cvt_(.+)$/.exec(sourceType);
+    if (!match) return sourceType;
+
+    const cached = this.cache.get(sourceType);
+    if (cached) return cached;
+
+    if (!this.sourceTemplates) {
+      const res = await withRetry(
+        () => this.tm.accounts.containers.workspaces.templates.list({ parent: this.sourceParent }),
+        "templates.list(source)"
+      );
+      this.sourceTemplates = res.data.template ?? [];
+    }
+    const sourceTemplateId = match[1];
+    const sourceTemplate = this.sourceTemplates.find((t) => t.templateId === sourceTemplateId);
+    if (!sourceTemplate) {
+      throw new Error(
+        `Custom template for type "${sourceType}" was not found in the source container's workspace.`
+      );
+    }
+
+    if (!this.targetTemplates) {
+      const res = await withRetry(
+        () => this.tm.accounts.containers.workspaces.templates.list({ parent: this.targetParent }),
+        "templates.list(target)"
+      );
+      this.targetTemplates = res.data.template ?? [];
+    }
+
+    let targetTemplate = this.targetTemplates.find((t) => sameTemplate(t, sourceTemplate));
+    if (!targetTemplate) {
+      const body = stripIdentityFields({ ...sourceTemplate }) as tagmanager_v2.Schema$CustomTemplate;
+      const created = await withRetry(
+        () => this.tm.accounts.containers.workspaces.templates.create({ parent: this.targetParent, requestBody: body }),
+        "templates.create"
+      );
+      targetTemplate = created.data;
+      this.targetTemplates.push(targetTemplate);
+    }
+    if (!targetTemplate.templateId) {
+      throw new Error(`Failed to import custom template "${sourceTemplate.name ?? sourceTemplateId}" into this container.`);
+    }
+
+    const targetType = `cvt_${targetTemplate.templateId}`;
+    this.cache.set(sourceType, targetType);
+    return targetType;
+  }
+}
+
 // Fields that identify WHERE a tag lives (account/container/workspace/tag
 // ID, its computed path, fingerprint, live URL). If the pasted JSON came
 // from an existing tag (exported, or copied from another container), these
@@ -136,11 +234,21 @@ async function upsertPublishTag(
   spec: BulkTagSpec,
   knownByName: Map<string, tagmanager_v2.Schema$Tag>,
   triggers: TriggerResolver,
+  templates: CustomTemplateResolver | null,
   changes: string[]
 ): Promise<tagmanager_v2.Schema$Tag> {
   const { firingTriggerName, ...rest } = spec;
   const tagFields = stripIdentityFields(rest);
   const firingTriggerId = firingTriggerName ? [await triggers.resolve(firingTriggerName)] : undefined;
+
+  if (typeof tagFields.type === "string" && tagFields.type.startsWith("cvt_")) {
+    if (!templates) {
+      throw new Error(
+        `Tag type "${tagFields.type}" is a custom-template reference, which needs a source container specified to copy that template from.`
+      );
+    }
+    tagFields.type = await templates.resolve(tagFields.type);
+  }
 
   const key = spec.name.trim().toLowerCase();
   const existing = knownByName.get(key);
@@ -216,13 +324,15 @@ async function pauseTagsByName(
 async function applyToContainer(
   tm: tagmanager_v2.Tagmanager,
   target: BulkTarget,
-  options: BulkApplyOptions
+  options: BulkApplyOptions,
+  sourceParent: string | null
 ): Promise<BulkApplyResult> {
   const changes: string[] = [];
   try {
     const workspaceId = await resolveWorkspaceId(tm, target.accountId, target.containerId);
     const parent = workspacePath(target.accountId, target.containerId, workspaceId);
     const triggers = new TriggerResolver(tm, parent);
+    const templates = sourceParent ? new CustomTemplateResolver(tm, sourceParent, parent) : null;
 
     const needsTagList = (options.publishTags?.length ?? 0) > 0 || (options.pauseTagNames?.length ?? 0) > 0;
     const existingTags = needsTagList
@@ -235,7 +345,7 @@ async function applyToContainer(
       );
       for (const tagSpec of options.publishTags) {
         await sleep(CALL_DELAY_MS);
-        const result = await upsertPublishTag(tm, parent, tagSpec, knownByName, triggers, changes);
+        const result = await upsertPublishTag(tm, parent, tagSpec, knownByName, triggers, templates, changes);
         knownByName.set(tagSpec.name.trim().toLowerCase(), result);
       }
     }
@@ -291,7 +401,15 @@ export async function bulkApply(
   options: BulkApplyOptions
 ): Promise<BulkApplyResult[]> {
   const tm = tagmanagerClient(accessToken);
-  return runInBatches(targets, (target) => applyToContainer(tm, target, options));
+
+  let sourceParent: string | null = null;
+  if (options.sourceContainer) {
+    const { accountId, containerId } = options.sourceContainer;
+    const workspaceId = await resolveWorkspaceId(tm, accountId, containerId);
+    sourceParent = workspacePath(accountId, containerId, workspaceId);
+  }
+
+  return runInBatches(targets, (target) => applyToContainer(tm, target, options, sourceParent));
 }
 
 async function publishOne(
