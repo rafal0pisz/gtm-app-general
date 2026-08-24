@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
     return Response.redirect(`${redirectBase}/?status=error&reason=missing_params`);
   }
 
-  const valid = consumeOAuthState(state);
+  const valid = await consumeOAuthState(state);
   if (!valid) {
     return Response.redirect(`${redirectBase}/?status=error&reason=invalid_state`);
   }
@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
   });
 
   if (!tokenRes.ok) {
-    return Response.redirect(`${redirectBase}/settings?tab=autoryzacja&status=error&reason=token_exchange`);
+    return Response.redirect(`${redirectBase}/?status=error&reason=token_exchange`);
   }
 
   const tokenData = await tokenRes.json() as { access_token: string; refresh_token?: string; expires_in?: number };

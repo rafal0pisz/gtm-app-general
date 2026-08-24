@@ -8,7 +8,7 @@ export async function GET() {
     return Response.json({ error: "GTM_CLIENT_ID not configured" }, { status: 500 });
   }
 
-  const state = createOAuthState();
+  const state = await createOAuthState();
 
   const params = new URLSearchParams({
     client_id: clientId,
