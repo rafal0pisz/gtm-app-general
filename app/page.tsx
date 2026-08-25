@@ -210,7 +210,7 @@ function HomeContent() {
                 Wgraj ten sam tag i pauzuj tagi po nazwie na wielu kontenerach Google Tag Manager naraz.
               </p>
             </div>
-            <BulkOpsPanel />
+            <BulkOpsPanel accountKey={status.email ?? "default"} />
           </>
         )}
       </main>

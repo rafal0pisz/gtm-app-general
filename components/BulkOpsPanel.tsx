@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import type { GtmContainer } from "@/app/api/gtm/accounts/containers/route";
 import { scanAccountsForContainers } from "@/lib/container-scan";
+import { clearCachedScan, describeCacheAge, loadCachedScan, saveCachedScan } from "@/lib/container-cache";
 
 // See globals.css — radii are defined there alongside the palette.
 const R = "var(--radius)";
@@ -92,9 +93,13 @@ function extractTagObjects(parsed: unknown): Record<string, unknown>[] {
   return [];
 }
 
-export function BulkOpsPanel() {
+export function BulkOpsPanel({ accountKey = "default" }: { accountKey?: string }) {
   // ── Container picker ────────────────────────────────────────────────────
   const [containers, setContainers] = useState<GtmContainer[]>([]);
+  // When the list came from the cache rather than a live scan: the timestamp
+  // it was saved at, so the UI can say how stale it might be.
+  const [fromCache, setFromCache] = useState<number | null>(null);
+  const cachedPacingRef = useRef(0);
   const [loadingContainers, setLoadingContainers] = useState(false);
   const [containersError, setContainersError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -156,6 +161,7 @@ export function BulkOpsPanel() {
     setContainers([]);
     setLoadingContainers(true);
     setAccountScanProgress(null);
+    setFromCache(null);
 
     try {
       const targetIds = new Set(
@@ -175,7 +181,7 @@ export function BulkOpsPanel() {
 
       setAccountScanProgress({ done: 0, total: allAccounts.length });
 
-      let pacingMs = 0;
+      let pacingMs = cachedPacingRef.current;
       const scan = await scanAccountsForContainers<GtmContainer>({
         accounts: allAccounts,
         chunkSize: ACCOUNT_CHUNK_SIZE,
@@ -212,12 +218,49 @@ export function BulkOpsPanel() {
       setNotFoundIds(scan.notFoundIds);
       if (isTargeted) setSelected(new Set(scan.containers.map((c) => c.publicId)));
       setLoaded(true);
+
+      cachedPacingRef.current = pacingMs;
+      // Only a full sweep is worth caching. A targeted scan stops as soon as
+      // it finds the requested IDs, so storing its result would leave a
+      // partial list masquerading as the complete one.
+      //
+      // A sweep with some accounts still failing is cached anyway: an account
+      // the user genuinely can't read would otherwise block caching forever,
+      // and a nearly-complete list available instantly beats no list at all.
+      if (!isTargeted) {
+        saveCachedScan(accountKey, scan.containers, pacingMs);
+      }
     } catch {
       setContainersError("Failed to load the container list.");
     } finally {
       setLoadingContainers(false);
     }
-  }, [targetIdsRaw]);
+  }, [targetIdsRaw, accountKey]);
+
+  // Fill the picker from the last full scan the moment the panel opens, so
+  // the common case costs no API calls at all.
+  useEffect(() => {
+    const cached = loadCachedScan(accountKey);
+    if (!cached) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrating from browser storage on mount
+    setContainers(cached.containers);
+    setFromCache(cached.savedAt);
+    setLoaded(true);
+    cachedPacingRef.current = cached.pacingMs ?? 0;
+  }, [accountKey]);
+
+  // With a cached list in hand, resolving pasted container IDs is a local
+  // lookup — no scan needed.
+  const selectFromPastedIds = useCallback(() => {
+    const ids = new Set(
+      targetIdsRaw.split(/[\n,]/).map((s) => s.trim().toUpperCase()).filter(Boolean)
+    );
+    if (ids.size === 0) return;
+    const found = containers.filter((c) => ids.has(c.publicId.toUpperCase()));
+    for (const c of found) ids.delete(c.publicId.toUpperCase());
+    setSelected(new Set(found.map((c) => c.publicId)));
+    setNotFoundIds([...ids]);
+  }, [targetIdsRaw, containers]);
 
   const accounts = useMemo(() => {
     const seen = new Map<string, string>();
@@ -613,6 +656,31 @@ export function BulkOpsPanel() {
     <div className="flex flex-col gap-8">
       {/* ── Step 1: containers ─────────────────────────────────────────── */}
       <Section title="1. Select containers">
+        {fromCache !== null && (
+          <div
+            className="mb-3 px-4 py-3 text-sm flex items-center justify-between gap-3 flex-wrap"
+            style={{ background: "var(--accent-subtle)", border: "1px solid var(--accent)", color: "var(--text-secondary)", borderRadius: R }}
+          >
+            <span>
+              {containers.length} container(s) loaded instantly from this browser — last full scan{" "}
+              {describeCacheAge(fromCache)}. Rescan only if containers were added or removed in GTM.
+            </span>
+            <button
+              onClick={() => {
+                clearCachedScan(accountKey);
+                setFromCache(null);
+                setContainers([]);
+                setLoaded(false);
+                setSelected(new Set());
+              }}
+              className="text-xs px-3 py-1.5 shrink-0"
+              style={{ background: "var(--surface)", border: "1px solid var(--border-strong)", color: "var(--text-secondary)", borderRadius: R }}
+            >
+              Discard saved list
+            </button>
+          </div>
+        )}
+
         <div className="mb-3">
           <Field label="Container public IDs (optional — GTM-XXXXXXX, one per line or comma-separated). Skips scanning every account you have access to; only looks for these.">
             <textarea
@@ -623,6 +691,15 @@ export function BulkOpsPanel() {
               style={{ ...inputStyle, fontFamily: "var(--font-mono)", resize: "vertical" }}
             />
           </Field>
+          {targetIdsRaw.trim() !== "" && containers.length > 0 && (
+            <button
+              onClick={selectFromPastedIds}
+              className="mt-2 text-sm font-semibold px-4 py-2"
+              style={{ background: "var(--accent)", color: "#fff", borderRadius: R }}
+            >
+              Select these IDs from the loaded list (no scan)
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-3 flex-wrap mb-3">
@@ -654,8 +731,8 @@ export function BulkOpsPanel() {
             {loadingContainers
               ? `Scanning... ${accountScanProgress?.done ?? 0}/${accountScanProgress?.total ?? 0} accounts, ${containers.length} found`
               : loaded
-              ? "Refresh"
-              : "Load containers"}
+              ? "Rescan all accounts"
+              : "Scan all accounts"}
           </button>
         </div>
 
@@ -663,7 +740,8 @@ export function BulkOpsPanel() {
 
         {notFoundIds.length > 0 && (
           <div className="mb-3 px-4 py-3 text-sm" style={{ background: "rgba(220,38,38,0.06)", border: "1px solid rgba(220,38,38,0.2)", color: "var(--error)", borderRadius: R }}>
-            Not found (checked every account you have access to): {notFoundIds.join(", ")}
+            Not found in the loaded container list: {notFoundIds.join(", ")}. If these were created
+            recently, rescan all accounts to pick them up.
           </div>
         )}
 
@@ -699,7 +777,7 @@ export function BulkOpsPanel() {
                     filtered.map((c) => {
                       const isSelected = selected.has(c.publicId);
                       return (
-                        <tr key={c.containerId} onClick={() => toggle(c.publicId)} className="cursor-pointer" style={{ background: isSelected ? "rgba(114,13,214,0.05)" : "transparent", borderBottom: "1px solid var(--border)" }}>
+                        <tr key={c.containerId} onClick={() => toggle(c.publicId)} className="cursor-pointer" style={{ background: isSelected ? "var(--accent-subtle)" : "transparent", borderBottom: "1px solid var(--border)" }}>
                           <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                             <input type="checkbox" checked={isSelected} onChange={() => toggle(c.publicId)} style={{ accentColor: "var(--accent)" }} />
                           </td>

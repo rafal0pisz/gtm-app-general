@@ -69,16 +69,27 @@ function backoffDelay(attempt: number): number {
 // project with a generous quota isn't permanently throttled to the slowest
 // safe speed, and a project with a tight one still settles under it instead
 // of failing.
-const MIN_INTERVAL_MS = Number(process.env.GTM_MIN_INTERVAL_MS) || 200;
+// Only the *start* of each call is spaced by this interval — calls overlap
+// freely once dispatched — so throughput is roughly one request per
+// interval. That makes the interval the single biggest lever on how long a
+// full account scan takes: at 400ms, 500 accounts can't finish in under
+// 200s no matter how much concurrency is thrown at it.
+//
+// So start optimistic and let the feedback loop find the real ceiling:
+// probing a too-fast pace costs one 429 and a short cooldown, while
+// starting slow costs minutes on every scan. Speeding back up is
+// deliberately eager for the same reason — a single quota hit early on
+// shouldn't leave the rest of a 500-account scan crawling.
+const MIN_INTERVAL_MS = Number(process.env.GTM_MIN_INTERVAL_MS) || 60;
 const MAX_INTERVAL_MS = Number(process.env.GTM_MAX_INTERVAL_MS) || 4_000;
-const START_INTERVAL_MS = Number(process.env.GTM_START_INTERVAL_MS) || 400;
+const START_INTERVAL_MS = Number(process.env.GTM_START_INTERVAL_MS) || 120;
 // The quota is measured per minute, so a hit means that minute's allowance
 // is already spent — a brief full stop lets it start refilling instead of
 // trickling more doomed requests at it.
-const QUOTA_COOLDOWN_MS = Number(process.env.GTM_QUOTA_COOLDOWN_MS) || 5_000;
-// How many consecutive successes before easing the pace back up. High
-// enough that one lucky call doesn't undo a backoff.
-const SPEEDUP_AFTER_OK = 15;
+const QUOTA_COOLDOWN_MS = Number(process.env.GTM_QUOTA_COOLDOWN_MS) || 3_000;
+// How many consecutive successes before easing the pace back up. Low enough
+// to recover quickly, high enough that one lucky call doesn't undo a backoff.
+const SPEEDUP_AFTER_OK = 5;
 
 export class AdaptiveRateLimiter {
   private queue: Promise<void> = Promise.resolve();
@@ -129,7 +140,7 @@ export class AdaptiveRateLimiter {
     if (this.intervalMs <= this.minIntervalMs) return;
     if (++this.okStreak < SPEEDUP_AFTER_OK) return;
     this.okStreak = 0;
-    this.intervalMs = Math.max(this.minIntervalMs, Math.round(this.intervalMs * 0.75));
+    this.intervalMs = Math.max(this.minIntervalMs, Math.round(this.intervalMs * 0.65));
   }
 
   get currentIntervalMs(): number {
