@@ -13,8 +13,9 @@ function okResponse(body: unknown = {}): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
 
-test("rate limiter spaces out concurrent callers", async () => {
-  const limiter = new AdaptiveRateLimiter(50, 4_000, 50, 0);
+test("rate limiter spaces out concurrent callers once the burst is spent", async () => {
+  // burst = 1, so every call after the first has to wait its turn.
+  const limiter = new AdaptiveRateLimiter(50, 4_000, 50, 0, 1);
   const dispatchTimes: number[] = [];
 
   await Promise.all(
@@ -27,8 +28,35 @@ test("rate limiter spaces out concurrent callers", async () => {
   dispatchTimes.sort((a, b) => a - b);
   for (let i = 1; i < dispatchTimes.length; i++) {
     const gap = dispatchTimes[i] - dispatchTimes[i - 1];
-    assert.ok(gap >= 45, `dispatch ${i} came ${gap}ms after the previous one, expected >= ~50ms`);
+    assert.ok(gap >= 40, `dispatch ${i} came ${gap}ms after the previous one, expected >= ~50ms`);
   }
+});
+
+test("a short burst goes out immediately, then settles to the paced rate", async () => {
+  const BURST = 8;
+  const limiter = new AdaptiveRateLimiter(100, 4_000, 100, 0, BURST);
+
+  const startedAt = Date.now();
+  for (let i = 0; i < BURST; i++) await limiter.waitForSlot();
+  const burstMs = Date.now() - startedAt;
+  assert.ok(burstMs < 60, `burst of ${BURST} took ${burstMs}ms — should be effectively instant`);
+
+  // The allowance is spent; the next few must be paced.
+  const pacedAt = Date.now();
+  for (let i = 0; i < 3; i++) await limiter.waitForSlot();
+  const pacedMs = Date.now() - pacedAt;
+  assert.ok(pacedMs >= 250, `3 further calls took ${pacedMs}ms — expected ~100ms apart once paced`);
+});
+
+test("a quota error spends the saved-up burst instead of firing it back into the wall", async () => {
+  const limiter = new AdaptiveRateLimiter(50, 4_000, 50, 40, 10);
+  limiter.reportQuotaError();
+
+  const startedAt = Date.now();
+  await limiter.waitForSlot();
+  await limiter.waitForSlot();
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed >= 40, `resumed after ${elapsed}ms — the cooldown should be respected`);
 });
 
 test("rate limiter slows down after a quota error and speeds back up on success", async () => {

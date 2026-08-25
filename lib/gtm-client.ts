@@ -80,7 +80,7 @@ function backoffDelay(attempt: number): number {
 // starting slow costs minutes on every scan. Speeding back up is
 // deliberately eager for the same reason — a single quota hit early on
 // shouldn't leave the rest of a 500-account scan crawling.
-const MIN_INTERVAL_MS = Number(process.env.GTM_MIN_INTERVAL_MS) || 60;
+const MIN_INTERVAL_MS = Number(process.env.GTM_MIN_INTERVAL_MS) || 25;
 const MAX_INTERVAL_MS = Number(process.env.GTM_MAX_INTERVAL_MS) || 4_000;
 const START_INTERVAL_MS = Number(process.env.GTM_START_INTERVAL_MS) || 120;
 // The quota is measured per minute, so a hit means that minute's allowance
@@ -90,27 +90,52 @@ const QUOTA_COOLDOWN_MS = Number(process.env.GTM_QUOTA_COOLDOWN_MS) || 3_000;
 // How many consecutive successes before easing the pace back up. Low enough
 // to recover quickly, high enough that one lucky call doesn't undo a backoff.
 const SPEEDUP_AFTER_OK = 5;
+// Requests allowed to go out with no wait at all when the limiter has been
+// idle. A per-minute quota isn't troubled by a short burst — looking up a
+// few dozen container IDs is a rounding error against it — but pacing every
+// one of them makes a small, quick job feel slow. Sustained work still
+// settles to the paced rate once the allowance is spent.
+const BURST = Number(process.env.GTM_BURST) || 20;
 
+// A token bucket: it refills at one token per `intervalMs`, and holds up to
+// `burst` of them. So a short job after an idle moment goes out at once,
+// while a long one settles to the paced rate as soon as the saved-up
+// allowance runs out — the sustained rate is what a per-minute quota
+// actually cares about.
 export class AdaptiveRateLimiter {
   private queue: Promise<void> = Promise.resolve();
-  private lastDispatch = 0;
   private intervalMs: number;
   private pauseUntil = 0;
   private okStreak = 0;
   private minIntervalMs: number;
   private maxIntervalMs: number;
   private cooldownMs: number;
+  private burst: number;
+  private tokens: number;
+  private lastRefill = Date.now();
 
   constructor(
     minIntervalMs = MIN_INTERVAL_MS,
     maxIntervalMs = MAX_INTERVAL_MS,
     startIntervalMs = START_INTERVAL_MS,
-    cooldownMs = QUOTA_COOLDOWN_MS
+    cooldownMs = QUOTA_COOLDOWN_MS,
+    burst = BURST
   ) {
     this.minIntervalMs = minIntervalMs;
     this.maxIntervalMs = maxIntervalMs;
     this.intervalMs = startIntervalMs;
     this.cooldownMs = cooldownMs;
+    this.burst = Math.max(1, burst);
+    this.tokens = this.burst;
+  }
+
+  private refill(): void {
+    const now = Date.now();
+    const gained = (now - this.lastRefill) / this.intervalMs;
+    if (gained > 0) {
+      this.tokens = Math.min(this.burst, this.tokens + gained);
+      this.lastRefill = now;
+    }
   }
 
   // Reserves the next available dispatch slot and resolves once it arrives.
@@ -119,10 +144,15 @@ export class AdaptiveRateLimiter {
   // don't back up the queue for everyone else.
   async waitForSlot(): Promise<void> {
     const mySlot = this.queue.then(async () => {
-      const readyAt = Math.max(this.lastDispatch + this.intervalMs, this.pauseUntil);
-      const wait = readyAt - Date.now();
-      if (wait > 0) await sleep(wait);
-      this.lastDispatch = Date.now();
+      const cooldown = this.pauseUntil - Date.now();
+      if (cooldown > 0) await sleep(cooldown);
+
+      this.refill();
+      if (this.tokens < 1) {
+        await sleep(Math.ceil((1 - this.tokens) * this.intervalMs));
+        this.refill();
+      }
+      this.tokens = Math.max(0, this.tokens - 1);
     });
     // Swallow rejections on the chain itself so one caller's failure can't
     // poison every subsequent waiter — each caller still awaits its own slot.
@@ -134,6 +164,10 @@ export class AdaptiveRateLimiter {
     this.okStreak = 0;
     this.intervalMs = Math.min(this.maxIntervalMs, Math.round(this.intervalMs * 2));
     this.pauseUntil = Date.now() + this.cooldownMs;
+    // Spend the saved-up allowance too, or the burst would fire straight
+    // back into the wall the moment the cooldown ends.
+    this.tokens = 0;
+    this.lastRefill = Date.now() + this.cooldownMs;
   }
 
   reportSuccess(): void {

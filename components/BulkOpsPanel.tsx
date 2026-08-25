@@ -24,6 +24,8 @@ const ACCOUNT_CHUNK_SIZE = 25;
 // failed. Quota errors are transient, so a couple of extra passes clears
 // nearly all of them without the user doing anything.
 const MAX_ACCOUNT_ATTEMPTS = 3;
+// Container IDs resolved per lookup request. Capped at what the route accepts.
+const LOOKUP_CHUNK_SIZE = 100;
 
 interface ApplyResult {
   accountId: string;
@@ -99,6 +101,8 @@ export function BulkOpsPanel({ accountKey = "default" }: { accountKey?: string }
   // When the list came from the cache rather than a live scan: the timestamp
   // it was saved at, so the UI can say how stale it might be.
   const [fromCache, setFromCache] = useState<number | null>(null);
+  const [lookingUp, setLookingUp] = useState(false);
+  const [lookupProgress, setLookupProgress] = useState<{ done: number; total: number } | null>(null);
   const cachedPacingRef = useRef(0);
   const [loadingContainers, setLoadingContainers] = useState(false);
   const [containersError, setContainersError] = useState<string | null>(null);
@@ -249,18 +253,117 @@ export function BulkOpsPanel({ accountKey = "default" }: { accountKey?: string }
     cachedPacingRef.current = cached.pacingMs ?? 0;
   }, [accountKey]);
 
-  // With a cached list in hand, resolving pasted container IDs is a local
-  // lookup — no scan needed.
-  const selectFromPastedIds = useCallback(() => {
-    const ids = new Set(
-      targetIdsRaw.split(/[\n,]/).map((s) => s.trim().toUpperCase()).filter(Boolean)
-    );
-    if (ids.size === 0) return;
-    const found = containers.filter((c) => ids.has(c.publicId.toUpperCase()));
-    for (const c of found) ids.delete(c.publicId.toUpperCase());
-    setSelected(new Set(found.map((c) => c.publicId)));
-    setNotFoundIds([...ids]);
-  }, [targetIdsRaw, containers]);
+  // Resolves pasted container IDs without walking every account: whatever is
+  // already loaded is matched locally, and the rest are asked for by ID
+  // directly. Either way it never falls back to a full sweep.
+  const findPastedIds = useCallback(async () => {
+    const wanted = [
+      ...new Set(targetIdsRaw.split(/[\n,]/).map((s) => s.trim().toUpperCase()).filter(Boolean)),
+    ];
+    if (wanted.length === 0) return;
+
+    setContainersError(null);
+    setNotFoundIds([]);
+    setFailedAccounts([]);
+
+    const byId = new Map(containers.map((c) => [c.publicId.toUpperCase(), c]));
+    const alreadyKnown = wanted.filter((id) => byId.has(id));
+    const missing = wanted.filter((id) => !byId.has(id));
+
+    // Everything was already in the loaded list — nothing to fetch.
+    if (missing.length === 0) {
+      setSelected(new Set(alreadyKnown.map((id) => byId.get(id)!.publicId)));
+      return;
+    }
+
+    setLookingUp(true);
+    setLookupProgress({ done: 0, total: missing.length });
+
+    const resolved: GtmContainer[] = [];
+    const notFound: string[] = [];
+    // Same reasoning as the account scan: a quota error is transient, so an
+    // ID that errored is tried again before it's reported as a problem.
+    const failures = new Map<string, string>();
+    const attempts = new Map<string, number>();
+    let pacingMs = cachedPacingRef.current;
+    const queue = [...missing];
+
+    try {
+      while (queue.length > 0) {
+        const batch = queue.splice(0, LOOKUP_CHUNK_SIZE);
+        const res = await fetch("/api/gtm/containers/lookup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tagIds: batch, pacingMs }),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          setContainersError(data.error ?? `HTTP ${res.status}`);
+          break;
+        }
+        const data = (await res.json()) as {
+          containers: GtmContainer[];
+          notFound: string[];
+          failed: { tagId: string; error: string }[];
+          pending: string[];
+          pacingMs?: number;
+        };
+        resolved.push(...data.containers);
+        notFound.push(...data.notFound);
+        for (const f of data.failed) {
+          failures.set(f.tagId, f.error);
+          attempts.set(f.tagId, (attempts.get(f.tagId) ?? 0) + 1);
+        }
+        // Ran out of time before reaching these — put them back.
+        if (data.pending.length > 0) queue.unshift(...data.pending);
+        if (typeof data.pacingMs === "number") pacingMs = data.pacingMs;
+
+        setLookupProgress({
+          done: missing.length - queue.length - failures.size,
+          total: missing.length,
+        });
+
+        // Fold retryable failures back in once the queue drains.
+        if (queue.length === 0) {
+          for (const tagId of [...failures.keys()]) {
+            if ((attempts.get(tagId) ?? 0) >= MAX_ACCOUNT_ATTEMPTS) continue;
+            failures.delete(tagId);
+            queue.push(tagId);
+          }
+        }
+      }
+
+      const failed = [...failures.entries()].map(([tagId, error]) => ({
+        accountId: tagId,
+        name: tagId,
+        error,
+      }));
+
+      // Fold the newly resolved containers into the list (and the saved one),
+      // so they're there next time without another round trip.
+      const merged = [...containers];
+      for (const c of resolved) {
+        if (!merged.some((existing) => existing.publicId === c.publicId)) merged.push(c);
+      }
+      setContainers(merged);
+      setLoaded(true);
+      cachedPacingRef.current = pacingMs;
+      if (fromCache !== null || merged.length > containers.length) {
+        saveCachedScan(accountKey, merged, pacingMs);
+      }
+
+      setSelected(
+        new Set([...alreadyKnown.map((id) => byId.get(id)!.publicId), ...resolved.map((c) => c.publicId)])
+      );
+      setNotFoundIds(notFound);
+      setFailedAccounts(failed);
+    } catch {
+      setContainersError("Failed to look up those container IDs.");
+    } finally {
+      setLookingUp(false);
+      setLookupProgress(null);
+    }
+  }, [targetIdsRaw, containers, accountKey, fromCache]);
 
   const accounts = useMemo(() => {
     const seen = new Map<string, string>();
@@ -682,7 +785,7 @@ export function BulkOpsPanel({ accountKey = "default" }: { accountKey?: string }
         )}
 
         <div className="mb-3">
-          <Field label="Container public IDs (optional — GTM-XXXXXXX, one per line or comma-separated). Skips scanning every account you have access to; only looks for these.">
+          <Field label="Container public IDs (GTM-XXXXXXX, one per line or comma-separated). Looked up directly by ID — no account scanning, so this is the fast path if you know which containers you want.">
             <textarea
               value={targetIdsRaw}
               onChange={(e) => setTargetIdsRaw(e.target.value)}
@@ -691,13 +794,16 @@ export function BulkOpsPanel({ accountKey = "default" }: { accountKey?: string }
               style={{ ...inputStyle, fontFamily: "var(--font-mono)", resize: "vertical" }}
             />
           </Field>
-          {targetIdsRaw.trim() !== "" && containers.length > 0 && (
+          {targetIdsRaw.trim() !== "" && (
             <button
-              onClick={selectFromPastedIds}
+              onClick={findPastedIds}
+              disabled={lookingUp}
               className="mt-2 text-sm font-semibold px-4 py-2"
-              style={{ background: "var(--accent)", color: "#fff", borderRadius: R }}
+              style={{ background: "var(--accent)", color: "#fff", borderRadius: R, opacity: lookingUp ? 0.6 : 1 }}
             >
-              Select these IDs from the loaded list (no scan)
+              {lookingUp
+                ? `Looking up... ${lookupProgress?.done ?? 0}/${lookupProgress?.total ?? 0}`
+                : "Find these IDs"}
             </button>
           )}
         </div>
@@ -740,8 +846,8 @@ export function BulkOpsPanel({ accountKey = "default" }: { accountKey?: string }
 
         {notFoundIds.length > 0 && (
           <div className="mb-3 px-4 py-3 text-sm" style={{ background: "rgba(220,38,38,0.06)", border: "1px solid rgba(220,38,38,0.2)", color: "var(--error)", borderRadius: R }}>
-            Not found in the loaded container list: {notFoundIds.join(", ")}. If these were created
-            recently, rescan all accounts to pick them up.
+            Not found: {notFoundIds.join(", ")}. Either the ID is mistyped, or the Google account
+            you connected has no access to that container.
           </div>
         )}
 
