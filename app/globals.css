@@ -1,27 +1,39 @@
 @import "tailwindcss";
 
+/* Bettersteps design language: white surfaces on a light grey page, coral
+   accent, soft neutral borders and generous corner radii. */
 :root {
-  --background: #ffffff;
-  --surface: #fafafa;
-  --surface-elevated: #f3f0fa;
-  --surface-hover: #ede8f7;
-  --border: #e4ddf5;
-  --text-primary: #000000;
-  --text-secondary: #4a4a5a;
-  --text-muted: #888899;
-  --accent: #720dd6;
-  --accent-hover: #5c0ab0;
-  --accent-subtle: rgba(114, 13, 214, 0.08);
+  --background: #f9fafb;
+  --surface: #ffffff;
+  --surface-elevated: #f9fafb;
+  --surface-hover: #f3f4f6;
+  --border: #f3f4f6;
+  --border-strong: #e5e7eb;
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --text-muted: #9ca3af;
+  --accent: #ff8282;
+  --accent-hover: #f96b6b;
+  --accent-subtle: #fff0f0;
   --success: #16a34a;
   --warning: #d97706;
   --error: #dc2626;
+  /* Disabled controls: on white cards a --surface-elevated fill is almost
+     invisible, so inactive buttons get their own slightly darker pair that
+     still reads as a control and keeps its label legible. */
+  --control-disabled-bg: #f3f4f6;
+  --control-disabled-fg: #6b7280;
+  /* Single source of truth for corner radii — the components read these
+     through inline styles, so changing them here restyles everything. */
+  --radius: 8px;
+  --radius-lg: 12px;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--text-primary);
-  --font-sans: var(--font-poppins), system-ui, -apple-system, sans-serif;
-  --font-mono: var(--font-fira), monospace;
+  --font-sans: var(--font-inter), system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-fira), ui-monospace, monospace;
 }
 
 * {
@@ -50,7 +62,7 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: var(--border-strong);
   border-radius: 3px;
 }
 
@@ -61,6 +73,14 @@ body {
 ::selection {
   background: var(--accent-subtle);
   color: var(--text-primary);
+}
+
+/* Focus ring in the accent colour, matching the Bettersteps form styling. */
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-subtle);
 }
 
 pre, code {

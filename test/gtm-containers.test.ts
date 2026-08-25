@@ -53,9 +53,9 @@ const accounts = (n: number) =>
   Array.from({ length: n }, (_, i) => ({ accountId: String(1000 + i), name: `Account ${i}` }));
 
 test("parseContainerName handles the documented name formats", () => {
-  assert.deepEqual(parseContainerName("sanofi.com - PL"), { domain: "sanofi.com", countryCode: "PL" });
-  assert.deepEqual(parseContainerName("PL - sanofi.com"), { domain: "sanofi.com", countryCode: "PL" });
-  assert.deepEqual(parseContainerName("sanofi.com - Global"), { domain: "sanofi.com", countryCode: "Global" });
+  assert.deepEqual(parseContainerName("example.com - PL"), { domain: "example.com", countryCode: "PL" });
+  assert.deepEqual(parseContainerName("PL - example.com"), { domain: "example.com", countryCode: "PL" });
+  assert.deepEqual(parseContainerName("example.com - Global"), { domain: "example.com", countryCode: "Global" });
   assert.equal(parseContainerName("no separator here"), null);
 });
 

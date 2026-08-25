@@ -1,12 +1,11 @@
 import type { Metadata } from "next";
-import { Poppins, Fira_Code } from "next/font/google";
+import { Inter, Fira_Code } from "next/font/google";
 import "./globals.css";
 
-const poppins = Poppins({
-  variable: "--font-poppins",
+const inter = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
-  style: ["normal", "italic"],
+  weight: ["400", "500", "600", "700"],
   display: "swap",
 });
 
@@ -28,7 +27,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="pl" className={`${poppins.variable} ${firaCode.variable} h-full`}>
+    <html lang="pl" className={`${inter.variable} ${firaCode.variable} h-full`}>
       <body className="min-h-full flex flex-col antialiased">
         {children}
       </body>

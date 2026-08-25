@@ -4,7 +4,9 @@ import { useState, useMemo, useCallback } from "react";
 import type { GtmContainer } from "@/app/api/gtm/accounts/containers/route";
 import { scanAccountsForContainers } from "@/lib/container-scan";
 
-const R = "4px";
+// See globals.css — radii are defined there alongside the palette.
+const R = "var(--radius)";
+const R_LG = "var(--radius-lg)";
 // Kept small: each container can take a while now that write calls retry
 // with backoff on GTM API quota errors, so a big chunk risks the Vercel
 // function timing out before it finishes.
@@ -678,10 +680,10 @@ export function BulkOpsPanel() {
 
         {(loaded || (loadingContainers && containers.length > 0)) && !containersError && (
           <>
-            <div style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden", maxHeight: 360, overflowY: "auto" }}>
+            <div style={{ border: "1px solid var(--border)", borderRadius: R_LG, overflow: "hidden", maxHeight: 360, overflowY: "auto" }}>
               <table className="w-full text-sm border-collapse">
                 <thead>
-                  <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)", position: "sticky", top: 0 }}>
+                  <tr style={{ background: "var(--surface-elevated)", borderBottom: "1px solid var(--border)", position: "sticky", top: 0 }}>
                     <th className="w-10 px-3 py-3">
                       <input type="checkbox" checked={filtered.length > 0 && filtered.every((c) => selected.has(c.publicId))} onChange={selectAllFiltered} style={{ accentColor: "var(--accent)" }} />
                     </th>
@@ -727,7 +729,7 @@ export function BulkOpsPanel() {
           onClick={loadWorkspaces}
           disabled={selected.size === 0 || workspacesLoading}
           className="text-sm font-semibold px-5 py-2.5"
-          style={{ background: selected.size > 0 ? "var(--accent)" : "var(--surface-elevated)", color: selected.size > 0 ? "#fff" : "var(--text-muted)", borderRadius: R }}
+          style={{ background: selected.size > 0 ? "var(--accent)" : "var(--control-disabled-bg)", color: selected.size > 0 ? "#fff" : "var(--control-disabled-fg)", borderRadius: R }}
         >
           {workspacesLoading
             ? `Loading workspaces... (${workspacesProgress?.done ?? 0}/${workspacesProgress?.total ?? 0})`
@@ -735,10 +737,10 @@ export function BulkOpsPanel() {
         </button>
 
         {workspacesResults.length > 0 && (
-          <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
+          <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R_LG, overflow: "hidden" }}>
             <table className="w-full text-sm border-collapse">
               <thead>
-                <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+                <tr style={{ background: "var(--surface-elevated)", borderBottom: "1px solid var(--border)" }}>
                   <Th>Container</Th>
                   <Th>Workspace to publish</Th>
                 </tr>
@@ -805,10 +807,10 @@ export function BulkOpsPanel() {
             </div>
 
             {createVersionResults.length > 0 && (
-              <div style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
+              <div style={{ border: "1px solid var(--border)", borderRadius: R_LG, overflow: "hidden" }}>
                 <table className="w-full text-sm border-collapse">
                   <thead>
-                    <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+                    <tr style={{ background: "var(--surface-elevated)", borderBottom: "1px solid var(--border)" }}>
                       <Th>Container</Th>
                       <Th>Version</Th>
                       <Th>Status</Th>
@@ -849,7 +851,7 @@ export function BulkOpsPanel() {
                 <button onClick={handlePublishFromWorkspaces} className="text-sm font-semibold px-4 py-2" style={{ background: "var(--error)", color: "#fff", borderRadius: R }}>
                   Yes, publish
                 </button>
-                <button onClick={() => setConfirmingVersionPublish(false)} className="text-sm px-4 py-2" style={{ background: "var(--surface-elevated)", color: "var(--text-secondary)", borderRadius: R }}>
+                <button onClick={() => setConfirmingVersionPublish(false)} className="text-sm px-4 py-2" style={{ background: "var(--surface)", color: "var(--text-secondary)", border: "1px solid var(--border-strong)", borderRadius: R }}>
                   Cancel
                 </button>
               </div>
@@ -860,10 +862,10 @@ export function BulkOpsPanel() {
               </p>
             )}
             {versionPublishResults.length > 0 && (
-              <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
+              <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R_LG, overflow: "hidden" }}>
                 <table className="w-full text-sm border-collapse">
                   <thead>
-                    <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+                    <tr style={{ background: "var(--surface-elevated)", borderBottom: "1px solid var(--border)" }}>
                       <Th>Container</Th>
                       <Th>Status</Th>
                       <Th>Error</Th>
@@ -966,17 +968,17 @@ export function BulkOpsPanel() {
           onClick={handleApply}
           disabled={!canApply}
           className="text-sm font-semibold px-5 py-2.5"
-          style={{ background: canApply ? "var(--accent)" : "var(--surface-elevated)", color: canApply ? "#fff" : "var(--text-muted)", borderRadius: R, cursor: canApply ? "pointer" : "default" }}
+          style={{ background: canApply ? "var(--accent)" : "var(--control-disabled-bg)", color: canApply ? "#fff" : "var(--control-disabled-fg)", borderRadius: R, cursor: canApply ? "pointer" : "default" }}
         >
           {applying ? `Applying... (${applyProgress?.done ?? 0}/${applyProgress?.total ?? 0})` : `Apply to ${selected.size} container(s)`}
         </button>
         {applyError && <ErrorBox>{applyError}</ErrorBox>}
 
         {applyResults.length > 0 && (
-          <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
+          <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R_LG, overflow: "hidden" }}>
             <table className="w-full text-sm border-collapse">
               <thead>
-                <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+                <tr style={{ background: "var(--surface-elevated)", borderBottom: "1px solid var(--border)" }}>
                   <th className="w-10 px-3 py-2">
                     <input type="checkbox" checked={readyToPublish.length > 0 && readyToPublish.every((r) => selectedForPublish.has(r.containerId))} onChange={selectAllReady} style={{ accentColor: "var(--accent)" }} />
                   </th>
@@ -1025,7 +1027,7 @@ export function BulkOpsPanel() {
               onClick={() => setConfirmingPublish(true)}
               disabled={selectedForPublish.size === 0 || publishing}
               className="text-sm font-semibold px-5 py-2.5"
-              style={{ background: selectedForPublish.size > 0 ? "var(--error)" : "var(--surface-elevated)", color: selectedForPublish.size > 0 ? "#fff" : "var(--text-muted)", borderRadius: R }}
+              style={{ background: selectedForPublish.size > 0 ? "var(--error)" : "var(--control-disabled-bg)", color: selectedForPublish.size > 0 ? "#fff" : "var(--control-disabled-fg)", borderRadius: R }}
             >
               Publish selected versions
             </button>
@@ -1037,7 +1039,7 @@ export function BulkOpsPanel() {
               <button onClick={handlePublish} className="text-sm font-semibold px-4 py-2" style={{ background: "var(--error)", color: "#fff", borderRadius: R }}>
                 Yes, publish
               </button>
-              <button onClick={() => setConfirmingPublish(false)} className="text-sm px-4 py-2" style={{ background: "var(--surface-elevated)", color: "var(--text-secondary)", borderRadius: R }}>
+              <button onClick={() => setConfirmingPublish(false)} className="text-sm px-4 py-2" style={{ background: "var(--surface)", color: "var(--text-secondary)", border: "1px solid var(--border-strong)", borderRadius: R }}>
                 Cancel
               </button>
             </div>
@@ -1050,10 +1052,10 @@ export function BulkOpsPanel() {
           {publishError && <ErrorBox>{publishError}</ErrorBox>}
 
           {publishResults.length > 0 && (
-            <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R, overflow: "hidden" }}>
+            <div className="mt-4" style={{ border: "1px solid var(--border)", borderRadius: R_LG, overflow: "hidden" }}>
               <table className="w-full text-sm border-collapse">
                 <thead>
-                  <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+                  <tr style={{ background: "var(--surface-elevated)", borderBottom: "1px solid var(--border)" }}>
                     <Th>Container</Th>
                     <Th>Status</Th>
                     <Th>Error</Th>
@@ -1095,8 +1097,16 @@ const inputStyle: React.CSSProperties = {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
-      <h2 className="text-sm font-semibold mb-3" style={{ color: "var(--text-primary)" }}>{title}</h2>
-      <div className="p-5" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: R }}>
+      <h2
+        className="text-[11px] font-medium uppercase tracking-wider mb-2 px-0.5"
+        style={{ color: "var(--text-muted)" }}
+      >
+        {title}
+      </h2>
+      <div
+        className="p-5"
+        style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: R_LG }}
+      >
         {children}
       </div>
     </section>

@@ -29,10 +29,10 @@ export interface GtmAccountInfo {
 }
 
 // Expected formats:
-//   {DOMAIN} - {CC}          e.g. "sanofi.com - PL"
-//   {CC} - {DOMAIN}          e.g. "PL - sanofi.com"
-//   {DOMAIN} - Global        e.g. "sanofi.com - Global"
-//   Global - {DOMAIN}        e.g. "Global - sanofi.com"
+//   {DOMAIN} - {CC}          e.g. "example.com - PL"
+//   {CC} - {DOMAIN}          e.g. "PL - example.com"
+//   {DOMAIN} - Global        e.g. "example.com - Global"
+//   Global - {DOMAIN}        e.g. "Global - example.com"
 // Country code: 2-letter ISO code (uppercase) or the literal "Global".
 const CC_RE = /^[A-Z]{2}$/;
 
